@@ -25,6 +25,17 @@ jobs:
         with:
           node-version: '20'
 
+      # 移动公众协议侧车的运行时依赖：回归测试里有一批**真实拉起侧车**的断言，
+      # 缺了这些包（曾经的 ModuleNotFoundError: No module named 'Crypto'）会让侧车级
+      # 断言退化成"只验证未就绪"，闸门形同虚设 —— 与 Dockerfile 保持一致装齐。
+      - name: Set up Python (sidecar runtime)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install sidecar dependencies
+        run: pip install -r app/ecloud_engine/requirements.txt
+
       - name: Syntax check (node --check)
         run: node tests/syntax_check.js
 

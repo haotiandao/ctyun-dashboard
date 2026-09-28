@@ -1654,7 +1654,8 @@ testAsync('签约常量内置：覆盖文件缺失时，侧车必须靠内置公
     assert.strictEqual(
       h.credentials, 'loaded',
       `覆盖文件缺失时必须回落到内置公开常量（public_credentials.json）并加载成功，` +
-        `实际 credentials=${h.credentials}，原因: ${(h.credentialError || h.importError || '(空)').slice(0, 200)}`
+        `实际 credentials=${h.credentials}，原因: ${(h.credentialError || h.importError || '(空)').slice(0, 200)}` +
+        `（本机如提示缺 Python 包，请 pip install -r app/ecloud_engine/requirements.txt）`
     );
   } finally {
     await eng.stop();
