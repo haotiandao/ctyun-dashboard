@@ -1239,6 +1239,27 @@ const MUTATIONS = [
     to: 'f.autoBoot !== false',
     replaceAll: false,
   },
+  {
+    // 2026-09-28 用户拍板「公开常量直接打包进去」后新增：删除内置兜底来源
+    // ⇒ 全新部署（没有覆盖文件、没有环境变量）会因凭据缺失直接不可用，
+    // "开箱即用"的行为断言必须因此变红。
+    id: 'M120',
+    name: '开箱即用失守：内置公开常量不再参与加载（新部署必须自备凭据文件）',
+    file: 'app/ecloud_engine/config.py',
+    from: '    for label, path in (("覆盖文件", cred_file), ("内置公开常量", bundled_file)):',
+    to: '    for label, path in (("覆盖文件", cred_file),):',
+    replaceAll: false,
+  },
+  {
+    // 同轮：优先级倒退 —— 环境变量不再是最高优先来源（用户显式注入被内置常量/覆盖文件压住）。
+    // 哨兵行为断言（ECLOUD_ACCESS_KEY / ECLOUD_SECRET_KEY 必须原样生效）必须因此变红。
+    id: 'M121',
+    name: '优先级倒退：环境变量不再最优先（显式注入被内置常量压住）',
+    file: 'app/ecloud_engine/config.py',
+    from: '    ak = os.environ.get("ECLOUD_ACCESS_KEY")',
+    to: '    ak = None',
+    replaceAll: false,
+  },
 ];
 
 // ---------------------------------------------------------------------------

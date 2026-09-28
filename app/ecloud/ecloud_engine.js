@@ -122,6 +122,9 @@ class EcloudEngine extends (require('events').EventEmitter) {
     this.onStderr = opts.onStderr || (() => {});
     this.requestTimeoutMs = opts.requestTimeoutMs || 45000;
     this.maxRestarts = opts.maxRestarts == null ? 3 : opts.maxRestarts;
+    // 额外环境变量（覆盖 process.env）：生产用不到，测试用它验证"凭据文件不存在"
+    // 这类部署配置分支（ECLOUD_CRED_FILE 指向不同路径），不必真去改宿主机环境。
+    this.extraEnv = opts.env && typeof opts.env === 'object' ? opts.env : {};
 
     this._proc = null;
     this._state = EngineState.STOPPED;
@@ -187,7 +190,7 @@ class EcloudEngine extends (require('events').EventEmitter) {
       const child = spawn(this._spawnTarget.path, [...this._spawnTarget.args, SIDECAR], {
         cwd: ENGINE_DIR,
         stdio: ['pipe', 'pipe', 'pipe'],
-        env: process.env,
+        env: { ...process.env, ...this.extraEnv },
       });
       this._proc = child;
 

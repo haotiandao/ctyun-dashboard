@@ -1474,30 +1474,48 @@ test('侧车桥接层必须存在且导出完整接口', () => {
   assert.ok(/module\.exports\s*=/.test(ecloudEngineCode), 'ecloud_engine.js 必须导出模块');
 });
 
-test('方案 B：协议凭据不得出现在源码里（AccessKey / SecretKey / PEM 实体）', () => {
+test('签名常量红线：config.py 本身不得出现字面值（值只许待在专用数据文件里）', () => {
   assert.ok(ecloudConfigPy, 'app/ecloud_engine/config.py 缺失');
   assert.ok(
     !/ACCESS_KEY\s*=\s*["'][0-9a-f]{32}["']/i.test(ecloudConfigPy),
-    'ACCESS_KEY 被硬编码回源码 —— 违反方案 B（Public 仓库等于公开泄露官方客户端凭据）'
+    'ACCESS_KEY 字面值被写回 config.py —— 值只能来自环境变量 / 覆盖文件 / 内置常量文件'
   );
   assert.ok(
     !/SECRET_KEY\s*=\s*["'][0-9a-f]{32}["']/i.test(ecloudConfigPy),
-    'SECRET_KEY 被硬编码回源码 —— 违反方案 B'
+    'SECRET_KEY 字面值被写回 config.py —— 值只能来自环境变量 / 覆盖文件 / 内置常量文件'
   );
   assert.ok(
     !/-----BEGIN [A-Z ]*KEY-----[\s\S]{0,200}?\nM[A-Za-z0-9+/]{40,}/.test(ecloudConfigPy),
-    'RSA 密钥实体（PEM 主体）出现在源码中 —— 违反方案 B'
+    'RSA 密钥实体（PEM 主体）出现在 config.py —— 值只能来自专用数据文件'
   );
 });
 
-test('方案 B：凭据必须外置加载，且缺失即报错（不许静默降级）', () => {
-  assert.ok(/def _load_credentials\(/.test(ecloudConfigPy), '缺少凭据外置加载器');
+test('签名常量：内置公开值必须齐备、可被覆盖，且缺失即报错（不许静默降级）', () => {
+  assert.ok(/def _load_credentials\(/.test(ecloudConfigPy), '缺少凭据加载器');
   assert.ok(/ECLOUD_ACCESS_KEY/.test(ecloudConfigPy), '必须支持环境变量注入凭据');
-  assert.ok(/ECLOUD_CRED_FILE/.test(ecloudConfigPy), '必须支持 ECLOUD_CRED_FILE 指向的凭据文件');
+  assert.ok(/ECLOUD_CRED_FILE/.test(ecloudConfigPy), '必须支持 ECLOUD_CRED_FILE 指向的覆盖文件');
+  assert.ok(/public_credentials\.json/.test(ecloudConfigPy), '必须回落到内置公开常量文件');
   assert.ok(/class CredentialMissing/.test(ecloudConfigPy), '必须定义 CredentialMissing');
   assert.ok(
     /raise CredentialMissing\(/.test(ecloudConfigPy),
-    '凭据缺失必须抛错 —— 静默降级会让整条保活链在"看似正常"下失败'
+    '所有来源都取不到时必须抛错 —— 静默降级会让整条保活链在"看似正常"下失败'
+  );
+
+  // 内置公开常量文件：必须存在、可解析、四字段齐全（开箱即用的前提）
+  const bundledPath = path.join(ROOT, 'app/ecloud_engine/public_credentials.json');
+  assert.ok(fs.existsSync(bundledPath), 'app/ecloud_engine/public_credentials.json 缺失 —— 镜像将无法开箱即用');
+  const bundled = JSON.parse(fs.readFileSync(bundledPath, 'utf8'));
+  for (const k of ['accessKey', 'secretKey', 'rsaPublicPem', 'rsaPrivatePem']) {
+    assert.ok(bundled[k] && String(bundled[k]).trim(), `内置公开常量缺字段 ${k}`);
+  }
+  // 该文件必须随仓库/镜像分发：任何忽略规则都不得把它挡掉
+  assert.ok(
+    !/public_credentials/.test(gitignoreCode),
+    'public_credentials.json 被 .gitignore 命中 —— 内置常量会随仓库一起丢失'
+  );
+  assert.ok(
+    !/public_credentials/.test(read('.dockerignore')),
+    'public_credentials.json 被 .dockerignore 命中 —— 镜像会缺内置常量'
   );
 });
 
@@ -1605,6 +1623,79 @@ testAsync('侧车可被真实拉起并跑通 IPC（无凭据时报"未就绪"而
     /协议引擎离线/.test((await eng.health().then(() => 'x').catch((e) => e.message))),
     '离线后请求必须被拒绝，而不是挂起'
   );
+});
+
+testAsync('签约常量内置：覆盖文件缺失时，侧车必须靠内置公开常量正常加载（开箱即用）', async () => {
+  const { spawnSync } = require('child_process');
+  const { EcloudEngine } = require(path.join(ROOT, 'app/ecloud/ecloud_engine.js'));
+
+  const candidates = [process.env.ECLOUD_PYTHON, 'python3', 'python'].filter(Boolean);
+  let py = null;
+  for (const c of candidates) {
+    const r = spawnSync(c, ['-c', 'import sys; print(sys.version_info[0])'], { encoding: 'utf8' });
+    if (r.status === 0) { py = c; break; }
+  }
+  if (!py) {
+    console.log('        (跳过：本机无可用 Python —— 该行为断言未执行，CI 必须执行)');
+    return;
+  }
+
+  // 场景复现：全新部署、用户没放任何覆盖文件（ECLOUD_CRED_FILE 指向不存在的路径）
+  const missingPath = path.join(ROOT, 'data', 'no_such_credentials.json');
+  const eng = new EcloudEngine({
+    pythonPath: py,
+    env: { ECLOUD_CRED_FILE: missingPath },
+    onLog: () => {},
+    onStderr: () => {},
+    requestTimeoutMs: 20000,
+  });
+  try {
+    const h = await eng.start();
+    assert.strictEqual(
+      h.credentials, 'loaded',
+      `覆盖文件缺失时必须回落到内置公开常量（public_credentials.json）并加载成功，` +
+        `实际 credentials=${h.credentials}，原因: ${(h.credentialError || h.importError || '(空)').slice(0, 200)}`
+    );
+  } finally {
+    await eng.stop();
+  }
+});
+
+test('行为：环境变量必须是最优先来源（内置常量不得反过来覆盖用户的显式注入）', () => {
+  const { spawnSync } = require('child_process');
+  const ENGINE_DIR = path.join(ROOT, 'app/ecloud_engine');
+  const candidates = [process.env.ECLOUD_PYTHON, 'python3', 'python'].filter(Boolean);
+  let py = null;
+  for (const c of candidates) {
+    const r = spawnSync(c, ['-c', 'import sys; print(sys.version_info[0])'], { encoding: 'utf8' });
+    if (r.status === 0) { py = c; break; }
+  }
+  if (!py) {
+    console.log('        (跳过：本机无可用 Python —— 该行为断言未执行，CI 必须执行)');
+    return;
+  }
+
+  // 用哨兵值验证优先级：ECLOUD_CRED_FILE 指向不存在的路径 + 环境变量给出哨兵
+  const sentinelAk = 'SENTINEL_ACCESS_KEY_000000000000';
+  const sentinelSk = 'SENTINEL_SECRET_KEY_000000000000';
+  const r = spawnSync(
+    py,
+    ['-c', 'import config, json; print(json.dumps({"ak": config.ACCESS_KEY, "sk": config.SECRET_KEY}))'],
+    {
+      cwd: ENGINE_DIR,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        ECLOUD_CRED_FILE: path.join(ROOT, 'data', 'no_such_credentials.json'),
+        ECLOUD_ACCESS_KEY: sentinelAk,
+        ECLOUD_SECRET_KEY: sentinelSk,
+      },
+    }
+  );
+  assert.strictEqual(r.status, 0, `哨兵进程必须成功（stderr: ${(r.stderr || '').slice(0, 200)}）`);
+  const got = JSON.parse((r.stdout || '').trim().split('\n').pop());
+  assert.strictEqual(got.ak, sentinelAk, '环境变量 ECLOUD_ACCESS_KEY 必须覆盖内置常量');
+  assert.strictEqual(got.sk, sentinelSk, '环境变量 ECLOUD_SECRET_KEY 必须覆盖内置常量');
 });
 
 // ============================================================================

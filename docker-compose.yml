@@ -14,6 +14,10 @@ services:
       - CTYUN_DATA_DIR=/app/data
     volumes:
       - ./data:/app/data
+      # 📡 移动公众（公众版）：镜像已内置公开签名常量，默认开箱即用，无需任何额外配置。
+      #    只有需要覆盖时（平台轮换 Key / 自定义凭据）才放文件，优先级：环境变量 > 覆盖文件 > 内置：
+      #    - ./data/ecloud_credentials.json       → 容器内 /app/data/ecloud_credentials.json
+      #    字段形状见 app/ecloud_engine/credentials.example.json。
     deploy:
       resources:
         limits:

@@ -6,7 +6,7 @@
 > ✨ **v2.2.1 稳定性与链路加固**：彻底解决天翼云每日打卡 40050 报错 (Issue #17) + 移动云 MQTT 官方报文适配与标准 8883 端口纠偏 + 双栈 IPv4 优先选路 + 前端多机周期精准联动 + 存储灾备双备份与钉钉加签支持。
 > ✨ **v2.2 重大更新**：单账号多主机精细化独立纳管（Per-VM 独立保活/任务/开机守护）+ 高精度单机独立时间戳时间轮调度（Per-Device Timestamp Wheel）+ 状态层叠动态联动与当日轮次统计。
 > ✨ **v2.1 全量融合**：全量融合中国移动云电脑（SOHO REST 签名加密 + ZTEC CAG TCP 三阶段握手），双云同台统一管理与统一配额。
-> 📌 **依赖说明**：天翼云与移动爱家保活为零 Python 依赖的纯原生 Node.js 实现；移动公众协议侧车需 Python 3（Docker 镜像已内置 python3 + requests + pycryptodome，本机直跑需自备 Python 3.12）。
+> 📌 **依赖说明**：天翼云与移动爱家保活为零 Python 依赖的纯原生 Node.js 实现；移动公众协议侧车需 Python 3（Docker 镜像已内置 python3 + requests + pycryptodome，本机直跑需自备 Python 3.12），其签名常量已内置公开值、开箱即用（见部署指南 §3）。
 
 ---
 ![控制台总览](https://github.com/user-attachments/assets/1cea9bcb-b06c-4845-8940-74565a3aa88c)
@@ -125,6 +125,25 @@ services:
 ```bash
 docker compose up -d
 ```
+
+#### 3. 📡 移动公众（公众版）：开箱即用，可选覆盖
+
+移动公众的签名常量（AccessKey / SecretKey / RSA 密钥对）是**官方公众线客户端内置的固定材料**（公开信息），镜像与仓库已内置（`app/ecloud_engine/public_credentials.json`），**默认无需任何额外配置即可添加与保活移动公众账号**。加载优先级：
+
+```
+环境变量  >  覆盖文件  >  内置公开常量
+```
+
+只有在下面两种情况才需要"覆盖"：
+- **平台轮换了这套 Key**，而你还不想升级镜像；
+- 你想显式指定自己的一份（多环境隔离 / 审计留痕）。
+
+覆盖方式（任选其一）：
+- Docker / Compose：把文件放到 compose 同级的 `data/` 目录（容器内即 `/app/data/ecloud_credentials.json`，与 `./data:/app/data` 挂载天然对齐）；或显式挂载 `-v $(pwd)/credentials.json:/app/data/ecloud_credentials.json:ro`；
+- 源码直跑：放到 `app/ecloud_engine/credentials.json`；
+- 或用环境变量注入：`ECLOUD_ACCESS_KEY` / `ECLOUD_SECRET_KEY` / `ECLOUD_RSA_PUBLIC_PEM` / `ECLOUD_RSA_PRIVATE_PEM`。
+
+字段形状见 `app/ecloud_engine/credentials.example.json`。这些常量**不含任何账号信息**——手机号、密码、会话 token 只存在本地 `data/` 目录，从不随仓库或镜像分发。
 
 ---
 

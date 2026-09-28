@@ -1,29 +1,36 @@
 """
 移动公众云电脑 协议常量与端点表（侧车内）。
 
-⚠️ 凭据外置（方案 B / 2026-09-24 拍板）
+📌 签名常量：内置公开值 + 可覆盖（2026-09-28 用户拍板，取代原「方案 B 全外置」）
 --------------------------------------------------------------------------
-本文件**不含任何签名凭据字面值**。`ACCESS_KEY` / `SECRET_KEY` /
-`PUBLIC_KEY_PEM` / `PRIVATE_KEY_PEM` 四个值在导入时从外部加载：
+本文件**本身不含任何签名凭据字面值**；四个值 `ACCESS_KEY` / `SECRET_KEY` /
+`PUBLIC_KEY_PEM` / `PRIVATE_KEY_PEM` 在导入时按下面的优先级解析：
 
-  1) 环境变量（优先）
+  1) 环境变量（最高优先）
        ECLOUD_ACCESS_KEY        AccessKey 字符串
        ECLOUD_SECRET_KEY        SecretKey 字符串
        ECLOUD_RSA_PUBLIC_PEM    客户端公钥 PEM 内容（或指向它的 *_FILE）
        ECLOUD_RSA_PRIVATE_PEM   客户端私钥 PEM 内容（或指向它的 *_FILE）
-  2) 凭据文件（其次）
-       ECLOUD_CRED_FILE 指向的 JSON，默认 <本目录>/credentials.json
+  2) 覆盖文件
+       ECLOUD_CRED_FILE 指向的 JSON；未设置时默认 <本目录>/credentials.json
        {
          "accessKey": "...",
          "secretKey": "...",
          "rsaPublicPem":  "-----BEGIN PUBLIC KEY-----\\n...",
          "rsaPrivatePem": "-----BEGIN PRIVATE KEY-----\\n..."
        }
+       部署对照：Docker 镜像内 ECLOUD_CRED_FILE=/app/data/ecloud_credentials.json
+       （即宿主机 compose 目录下的 data/ecloud_credentials.json）。
+  3) 内置公开常量（兜底，保证开箱即用）
+       <本目录>/public_credentials.json —— 官方公众线客户端内置的固定材料，
+       属公开信息，随仓库与镜像分发。平台轮换该套 Key 时替换此文件即可。
 
-**缺失即报错**（`CredentialMissing`），绝不静默降级 —— 静默降级会让整条保活链
-在"看似正常"的状态下失败，正是本项目最忌讳的失败模式。
+这四个值是"官方公众线客户端"的固定签名材料（HmacSHA1 签名 + 整体 RSA-1024 的
+组成部分，技术上无法像 token 那样动态获取），**不含任何账号信息**；账号凭据
+（手机号 / 密码 / 会话 token）只存在本地 data/ 目录，从不随仓库或镜像分发。
 
-本仓库为 Public：`credentials.json` 必须保持在 .gitignore 中，禁止入库。
+优先级之外的兜底行为：三者都取不到时**必须报错**（`CredentialMissing`），
+绝不静默降级 —— 静默降级会让整条保活链在"看似正常"的状态下失败。
 
 其余常量（地址、端点、签名方式、超时、错误码）均为协议公开信息，随源码入库。
 """
@@ -65,23 +72,30 @@ def _load_credentials() -> tuple[str, str, str, str]:
     pub = _read_pem("ECLOUD_RSA_PUBLIC_PEM", "ECLOUD_RSA_PUBLIC_PEM_FILE", "公钥")
     priv = _read_pem("ECLOUD_RSA_PRIVATE_PEM", "ECLOUD_RSA_PRIVATE_PEM_FILE", "私钥")
 
-    # 环境变量未给全 → 回落到凭据文件
-    if not (ak and sk and pub and priv):
-        cred_file = os.environ.get("ECLOUD_CRED_FILE") or str(
-            Path(__file__).resolve().with_name("credentials.json")
-        )
-        p = Path(cred_file)
-        if p.is_file():
-            try:
-                d = json.loads(p.read_text("utf-8"))
-            except Exception as e:  # 显式展开，不吞错
-                raise CredentialMissing(
-                    f"凭据文件解析失败: {cred_file} ({type(e).__name__}: {e})"
-                ) from e
-            ak = ak or d.get("accessKey")
-            sk = sk or d.get("secretKey")
-            pub = pub or d.get("rsaPublicPem")
-            priv = priv or d.get("rsaPrivatePem")
+    # 环境变量未给全 → 依次回落到「覆盖文件」与「内置公开常量」
+    #   · 覆盖文件：ECLOUD_CRED_FILE 指定，或默认 <本目录>/credentials.json（可不存在）
+    #   · 内置文件：<本目录>/public_credentials.json（随仓库与镜像分发，保证开箱即用）
+    cred_file = os.environ.get("ECLOUD_CRED_FILE") or str(
+        Path(__file__).resolve().with_name("credentials.json")
+    )
+    bundled_file = str(Path(__file__).resolve().with_name("public_credentials.json"))
+    for label, path in (("覆盖文件", cred_file), ("内置公开常量", bundled_file)):
+        if ak and sk and pub and priv:
+            break
+        p = Path(path)
+        if not p.is_file():
+            # 覆盖文件不存在是常态（首次部署 / 未自定义），交给下一级兜底，不算错误
+            continue
+        try:
+            d = json.loads(p.read_text("utf-8"))
+        except Exception as e:  # 显式展开，不吞错
+            raise CredentialMissing(
+                f"凭据文件解析失败（{label}）: {path} ({type(e).__name__}: {e})"
+            ) from e
+        ak = ak or d.get("accessKey")
+        sk = sk or d.get("secretKey")
+        pub = pub or d.get("rsaPublicPem")
+        priv = priv or d.get("rsaPrivatePem")
 
     missing = [
         name for name, val in (
@@ -92,8 +106,8 @@ def _load_credentials() -> tuple[str, str, str, str]:
     if missing:
         raise CredentialMissing(
             "移动公众协议凭据缺失: " + " / ".join(missing) +
-            " —— 请通过环境变量或 ECLOUD_CRED_FILE 指向的 credentials.json 提供；"
-            "本文件刻意不含字面值（方案 B）。"
+            " —— 请通过环境变量提供，或检查覆盖文件与内置常量文件是否完整"
+            f"（覆盖: {cred_file}；内置: {bundled_file}）。"
         )
     return ak, sk, pub, priv
 
