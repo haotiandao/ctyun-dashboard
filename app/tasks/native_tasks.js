@@ -503,8 +503,8 @@ async function executeNativeSign(client, acc, onLog = console.log) {
  */
 async function executeNativeHang(client, acc, onLog = console.log) {
   if (acc.platform === 'ydpc') {
-    onLog('Hang', `[${acc.name}] 移动云电脑无需执行挂机时长任务。`, 'info');
-    return { success: true, isCompleted: true, message: '移动云无需挂机' };
+    onLog('Hang', `[${acc.name}] 移动爱家无需执行挂机时长任务。`, 'info');
+    return { success: true, isCompleted: true, message: '移动爱家无需挂机' };
   }
 
   if (client && typeof client.runHangTask === 'function') {

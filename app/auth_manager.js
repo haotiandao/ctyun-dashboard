@@ -7,8 +7,126 @@ function hashPassword(password, salt = 'ctyun_salt_2026') {
 class AuthManager {
   constructor(configManager) {
     this.configManager = configManager;
-    this.sessions = new Map(); // token -> { userId, username, role, expiresAt }
+    // 【2026-09-28】免登录会话持久化：会话表原先是纯内存 Map，容器一重启全部丢失 ——
+    // 用户勾了"30 天内免登录"也必须重新登录，这是本次报障的根因。
+    // sessionStore = { load(): object|null, save(obj): void }，由 server.js 注入（data/auth_sessions.json）。
+    this.sessionStore = configManager.sessionStore || null;
+    this.sessions = new Map(); // token -> { userId, username, role, expiresAt, remember }
     this.initAdminUser();
+    this.restoreSessions();
+  }
+
+  /**
+   * 从磁盘恢复"免登录"会话（仅 remember=true 的会持久化；过期即丢弃）。
+   * 恢复的会话角色/quota 由 verifySession 每次从用户表动态同步，这里只存最小字段。
+   */
+  restoreSessions() {
+    if (!this.sessionStore) return;
+    const data = this.sessionStore.load();
+    if (!data || typeof data !== 'object') return;
+    let restored = 0;
+    for (const [token, s] of Object.entries(data)) {
+      if (!s || !s.userId || !s.expiresAt) continue;
+      if (Date.now() > s.expiresAt) continue; // 过期不恢复（30 天窗口到期）
+      this.sessions.set(token, {
+        userId: s.userId,
+        username: s.username || '',
+        role: '',
+        maxQuota: 2,
+        remember: true,
+        createdAt: s.createdAt || 0,
+        expiresAt: s.expiresAt,
+      });
+      restored++;
+    }
+    if (restored > 0) console.log(`[Auth] 已从磁盘恢复 ${restored} 个免登录会话（30 天窗口内）`);
+  }
+
+  /** 把 remember=true 的会话写盘（非免登录会话绝不落盘，避免公共电脑被持久化）。 */
+  _persistSessions() {
+    if (!this.sessionStore) return;
+    const out = {};
+    for (const [token, s] of this.sessions.entries()) {
+      if (!s.remember) continue;
+      out[token] = {
+        userId: s.userId,
+        username: s.username,
+        createdAt: s.createdAt || 0,
+        expiresAt: s.expiresAt,
+      };
+    }
+    this.sessionStore.save(out);
+  }
+
+  /** 登出 / 管理员清理：显式销毁会话（含落盘记录）。 */
+  destroySession(token) {
+    if (token && this.sessions.delete(token)) this._persistSessions();
+  }
+
+  createSession(user, remember = false) {
+    const token = crypto.randomUUID().replace(/-/g, '');
+    const now = Date.now();
+    const session = {
+      userId: user.id,
+      username: user.username,
+      role: user.role,
+      maxQuota: user.maxQuota || 2,
+      remember: !!remember, // 勾选"30 天内免登录"才落盘
+      createdAt: now,
+      expiresAt: now + 30 * 24 * 3600 * 1000 // 30天
+    };
+    this.sessions.set(token, session);
+    if (session.remember) this._persistSessions();
+    return token;
+  }
+
+  verifySession(token) {
+    if (!token) return null;
+    const session = this.sessions.get(token);
+    if (!session) return null;
+    if (Date.now() > session.expiresAt) {
+      this.sessions.delete(token);
+      this._persistSessions(); // 过期即清盘（否则磁盘会堆积死会话）
+      return null;
+    }
+    // 动态同步最新用户的 maxQuota、role 和 avatar；
+    // 用户已被删除 ⇒ 会话必须失效（否则残留会话还能以旧身份访问）。
+    const user = this.getUserById(session.userId);
+    if (user) {
+      session.role = user.role;
+      session.maxQuota = user.maxQuota;
+      session.avatar = user.avatar || '';
+    } else {
+      this.sessions.delete(token);
+      this._persistSessions();
+      return null;
+    }
+    return session;
+  }
+
+  login(username, password, remember = false) {
+    const cfg = this.configManager.config;
+    const user = (cfg.users || []).find(u => u.username === username);
+    if (!user) return { success: false, error: '用户不存在' };
+
+    const hash = hashPassword(password);
+    if (user.passwordHash !== hash) {
+      return { success: false, error: '密码错误' };
+    }
+
+    const token = this.createSession(user, remember);
+    return {
+      success: true,
+      token,
+      remember: !!remember,
+      user: {
+        id: user.id,
+        username: user.username,
+        role: user.role,
+        maxQuota: user.maxQuota,
+        avatar: user.avatar || ''
+      }
+    };
   }
 
   initAdminUser() {
@@ -31,61 +149,6 @@ class AuthManager {
     };
     cfg.users.push(admin);
     this.configManager.saveConfig();
-  }
-
-  createSession(user) {
-    const token = crypto.randomUUID().replace(/-/g, '');
-    const session = {
-      userId: user.id,
-      username: user.username,
-      role: user.role,
-      maxQuota: user.maxQuota || 2,
-      expiresAt: Date.now() + 30 * 24 * 3600 * 1000 // 30天
-    };
-    this.sessions.set(token, session);
-    return token;
-  }
-
-  verifySession(token) {
-    if (!token) return null;
-    const session = this.sessions.get(token);
-    if (!session) return null;
-    if (Date.now() > session.expiresAt) {
-      this.sessions.delete(token);
-      return null;
-    }
-    // 动态同步最新用户的 maxQuota、role 和 avatar
-    const user = this.getUserById(session.userId);
-    if (user) {
-      session.role = user.role;
-      session.maxQuota = user.maxQuota;
-      session.avatar = user.avatar || '';
-    }
-    return session;
-  }
-
-  login(username, password) {
-    const cfg = this.configManager.config;
-    const user = (cfg.users || []).find(u => u.username === username);
-    if (!user) return { success: false, error: '用户不存在' };
-
-    const hash = hashPassword(password);
-    if (user.passwordHash !== hash) {
-      return { success: false, error: '密码错误' };
-    }
-
-    const token = this.createSession(user);
-    return {
-      success: true,
-      token,
-      user: {
-        id: user.id,
-        username: user.username,
-        role: user.role,
-        maxQuota: user.maxQuota,
-        avatar: user.avatar || ''
-      }
-    };
   }
 
   register(username, password) {
@@ -231,10 +294,11 @@ class AuthManager {
     const user = (cfg.users || []).find(u => u.id === userId);
     if (!user || user.role === 'admin') return false;
     cfg.users = cfg.users.filter(u => u.id !== userId);
-    // 同时清理该用户的会话
+    // 同时清理该用户的会话（含落盘的免登录会话 —— 否则重启后残魂复活）
     for (const [token, s] of this.sessions.entries()) {
       if (s.userId === userId) this.sessions.delete(token);
     }
+    this._persistSessions();
     this.configManager.saveConfig();
     return true;
   }

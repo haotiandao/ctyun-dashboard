@@ -19,13 +19,37 @@ const { TaskScheduler } = require('./app/tasks/scheduler');
 const { SohoClient } = require('./app/ydpc/soho_client');
 const { performCagAuthHold } = require('./app/ydpc/cag_client');
 const { YdpcClient } = require('./app/ydpc/ydpc_client');
+const { EcloudClient, LOG_SOURCE: ECLOUD_LOG_SOURCE, INTERACTIVE_BRANCHES } = require('./app/ecloud/ecloud_client');
+const { LogPersister } = require('./app/persist_log');
 
 // 全局异常拦截看门狗 (确保守护服务长期稳定运行不宕机)
+// 【2026-09-27 退出取证】现场：面板曾静默死亡一次（exit=1、stdout/stderr 零输出、
+// 无 WER 记录、stderr 捕获已证实有效）⇒ 排除 JS 未捕获异常（handler 会吞且不退出）
+// 与原生崩溃（会打印 FATAL）⇒ 系外部终止（当时 Defender 正在做安全智能更新）。
+// 教训：进程自己死了却不留任何痕迹，违反本项目"退出绝不静默"原则。故补三件事：
+//   ① 异常/拒绝除 console.error 外**同时落持久日志**（stderr 可能丢失，jsonl 一定在）；
+//   ② 'exit' 钩子记录退出码（进程自杀/正常退出均可见）；
+//   ③ SIGINT/SIGTERM 记录并优雅退出（被要求停止时也留证）。
 process.on('uncaughtException', (err) => {
   console.error('[!] 系统未捕获异常已拦截 (常驻保障):', err?.message || err);
+  try { appendLog('System', `⚠️ 未捕获异常已拦截（进程继续运行）: ${(err && err.message) || err}`, 'error'); } catch (e) { /* 日志不可用则仅 console */ }
 });
 process.on('unhandledRejection', (reason) => {
   console.error('[!] 系统未处理 Promise 拒绝已拦截:', reason?.message || reason);
+  try { appendLog('System', `⚠️ 未处理 Promise 拒绝已拦截: ${(reason && reason.message) || reason}`, 'error'); } catch (e) { /* 同上 */ }
+});
+process.on('exit', (code) => {
+  try {
+    appendLog('System', `⚠️ 主进程即将退出 (code=${code})${code === 0 ? '' : ' —— 非零退出码，请对照上一条异常/信号日志'}`, code === 0 ? 'warning' : 'error');
+  } catch (e) { /* 退出路径尽力而为 */ }
+});
+process.on('SIGINT', () => {
+  try { appendLog('System', '收到 SIGINT (Ctrl+C)，主进程即将退出', 'warning'); } catch (e) { /* 同上 */ }
+  process.exit(0);
+});
+process.on('SIGTERM', () => {
+  try { appendLog('System', '收到 SIGTERM，主进程即将退出', 'warning'); } catch (e) { /* 同上 */ }
+  process.exit(0);
 });
 
 const PORT = process.env.PORT || 8571;
@@ -37,6 +61,18 @@ const DEVICES_DIR = path.join(DATA_DIR, 'devices');
 
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 if (!fs.existsSync(DEVICES_DIR)) fs.mkdirSync(DEVICES_DIR, { recursive: true });
+
+// 运行日志落盘（按北京日期滚动，默认保留 7 天）。
+// 为什么：日志原本只在内存 `logs` 数组里，服务重启即丢 —— 事后无法复盘
+// "机器为何被关机、当时保活在不在跑"。落盘失败会自动降级为仅内存，绝不影响主流程。
+const LOG_DIR = path.join(DATA_DIR, 'logs');
+const BOOT_LOG_LINES = Math.max(0, parseInt(process.env.CTYUN_LOG_BOOT_LINES, 10) || 400);
+const logPersister = new LogPersister({
+  dir: LOG_DIR,
+  retentionDays: parseInt(process.env.CTYUN_LOG_RETENTION_DAYS, 10) || 7,
+  onError: (msg) => console.error(`[日志落盘] ${msg}`)
+});
+logPersister.init();
 
 console.log('[*] 纯原生超轻量内核已启动 (纯 HTTP/WebSocket 协议直连，纯净无负担)');
 
@@ -63,8 +99,136 @@ let logIdCounter = 0;
 function isHeartbeatOrRoutine(source, message) {
   if (source === 'Heartbeat') return true;
   if (!message) return false;
+  // 【2026-09-23】数据面保活的 progress 日志（progress hb_sent=... hb_recv=...）每 10s 一条、
+  // 数字持续变化，需并入 routine 合并（只保留最新一条 + xN 计数）
+  if (message.includes('progress hb_sent=')) return true;
   return message.includes('心跳') || message.includes('保活周期') || message.includes('保持长连接') || message.includes('长连接保活') || message.includes('发送保活') || message.includes('REDQ') || message.includes('103 认证') || message.includes('118 用户身份') || message.includes('118 身份');
 }
+
+/**
+ * 折叠键归一化：把消息里的数字一律替换为 N。
+ *
+ * 【为什么需要 · 用户 2026-09-25】「progress hb_sent= 后面的不管咋变化，都属于同一种类型，
+ * 不用重复日志，显示最新的，然后后面 x 几就行」。同一件事只有数字在变的日志还有很多
+ * （移动公众的「累计 N 次」「累计 N 台成功」「在线时长 N小时N分N秒」），
+ * 若按原文逐字比对，每一轮都会被判成"新消息"→ 每轮新增一行。
+ */
+function normalizeRoutineDigits(message) {
+  return String(message).replace(/\d+/g, 'N');
+}
+
+/**
+ * 例行日志分类：只有命中这些"周期性口头禅"的消息才允许跨条目折叠。
+ * 不命中 → 返回 null，绝不参与折叠（保证异常/业务事件永不被合并掉）。
+ */
+const ROUTINE_MESSAGE_PATTERNS = [
+  'progress hb_sent=',   // ZTE 数据面 / 控制面心跳指标（约每 10s 一条，数字必变）
+  'progress slow=',      // SCG（深信服）数据面 hold 进度（约每 10s 一条，数字必变；display 状态变化会自然另起一条）
+  'SCG 材料探测',         // SCG firm-auth 材料巡检（presence 布尔，材料状态变化时内容才会变）
+  '账号态探针通过',        // 移动公众 L1 账号态探针
+  '桌面登记成功',          // 移动公众 L2 桌面登记
+  '分层巡检结果',          // 移动公众 L1/L2 汇总汇报
+  '已同步桌面列表',        // 移动公众桌面同步
+  '心跳', '保活周期', '保持长连接', '长连接保活', '发送保活',
+  'REDQ', '103 认证', '118 用户身份', '118 身份',
+];
+
+/**
+ * 计算"例行日志折叠键"：同 source + 同类型（去数字后文本一致）才得同一个键。
+ * 键里**必带 source**，确保三平台日志各自成流、绝不互相折叠。
+ */
+function routineFoldKey(source, message) {
+  if (!message) return null;
+  const m = String(message);
+  if (source === 'Heartbeat') return 'Heartbeat|' + normalizeRoutineDigits(m);
+  for (const pattern of ROUTINE_MESSAGE_PATTERNS) {
+    if (m.includes(pattern)) return source + '|' + normalizeRoutineDigits(m);
+  }
+  return null;
+}
+
+/**
+ * 例行日志折叠索引：折叠键 → 内存里那一条日志对象。
+ *
+ * 【为什么不再用"向前扫 N 条" · 用户 2026-09-25 第六轮】
+ * 原实现从数组末尾向前最多扫 300 条找同类条目。但一轮巡检里，多个账号的 progress / 心跳
+ * 会插入成百上千条日志，一旦超过窗口，同类条目就**找不到上一轮那条** → 另起一条新的、
+ * 从 x1 重新累计。真机回放里「分层巡检结果」被劈成 x190 + x37 两条，正是这个原因。
+ * 改为按折叠键直接查表 ⇒ O(1) 命中上一轮那条，窗口大小不再影响正确性。
+ */
+const routineFoldIndex = new Map();
+
+/** 折叠索引键：折叠键 + level + 账号（折叠键本身已含 source） */
+function routineFoldIndexKey(foldKey, level, accountName) {
+  return foldKey + '\u0000' + (level || 'info') + '\u0000' + (accountName || '');
+}
+
+// ---------------------------------------------------------------------------
+// 【2026-09-26 用户要求】例行日志折叠计数（xN）按天清零
+// ---------------------------------------------------------------------------
+// 用户原话：「[ZTE样本主号] progress hb_sent=261 hb_recv=555 data=5 left=637sx4056
+//            类似这样的日志，要按天清零，不然一直循环下去增加数量了。0点更新一下吧。」
+//
+// 折叠徽章 xN = "这条例行日志累计重复了多少次"，它此前只增不减（x4056 → x4057 …）。
+// 现改为**按北京时间每天 0 点归 1**，当天内照旧累计 ⇒ 界面上的 xN 表示"今日重复次数"。
+//   ① 只动**例行日志**（routineFoldKey 非空）——异常/业务条目一条都不许碰（取证红线）；
+//   ② 只把 repeatCount 归 1，**不改文本、不删条目、不动磁盘原始流水**（落盘那 4000+ 条仍在）；
+//   ③ 双保险：appendLog 惰性检查（进程休眠/重启后自动补上）+ 北京 0 点定时器（界面即时刷新）。
+let routineFoldDay = getBeijingDateOnly();
+
+/**
+ * 跨天则把例行日志的折叠计数归 1。返回被重置的条目数（0 = 未跨天或无命中）。
+ * @param {boolean} notify 是否经 SSE 立刻把归零后的条目推给前端（定时器路径用 true）。
+ *   惰性路径传 false：紧接其后的那条新日志本来就会触发一次 SSE 更新，无需重复推送。
+ */
+function rolloverRoutineFoldCountsIfNeeded(notify) {
+  const today = getBeijingDateOnly();
+  if (today === routineFoldDay) return 0;
+  routineFoldDay = today;
+  let changed = 0;
+  for (const entry of logs) {
+    if (!entry || typeof entry.message !== 'string') continue;
+    // ⚠️ 非例行日志（异常 / 业务事件）绝不触碰 —— 与折叠机制同一条红线
+    if (!routineFoldKey(entry.source, entry.message)) continue;
+    if ((entry.repeatCount || 1) <= 1) continue;
+    entry.repeatCount = 1;
+    changed++;
+    if (!notify) continue;
+    const payload = { ...entry, isUpdate: true };
+    for (const client of sseClients) {
+      try {
+        if (canUserSeeLog(client.session, entry)) {
+          client.res.write(`data: ${JSON.stringify(payload)}\n\n`);
+        }
+      } catch (e) {
+        sseClients.delete(client);
+      }
+    }
+  }
+  return changed;
+}
+
+/** 距下一个北京 0 点还有多少毫秒（北京无夏令时，恒 UTC+8，故可纯算术） */
+function msUntilNextBeijingMidnight() {
+  const OFFSET_MS = 8 * 3600 * 1000;
+  const bj = Date.now() + OFFSET_MS;
+  return (Math.floor(bj / 86400000) + 1) * 86400000 - bj;
+}
+
+/** 北京 0 点触发清零；**自续期**重排下一个 0 点（不做 while 轮询） */
+function scheduleRoutineFoldDayRollover() {
+  const timer = setTimeout(() => {
+    try {
+      rolloverRoutineFoldCountsIfNeeded(true);
+    } catch (e) {
+      // 日志维护出错绝不影响主流程，但必须留痕（不得空 catch）
+      console.error(`[日志折叠] 跨天清零失败: ${e.message}`);
+    }
+    scheduleRoutineFoldDayRollover();
+  }, msUntilNextBeijingMidnight());
+  if (timer.unref) timer.unref();
+}
+scheduleRoutineFoldDayRollover();
 
 // 自动日志清理维护定时器：每小时执行一次，自动清理超过 3 天的历史日志或多于 2000 条的数据
 setInterval(() => {
@@ -73,34 +237,114 @@ setInterval(() => {
   }
 }, 3600 * 1000);
 
-function appendLog(source, message, level = 'info', accountName = '', platform = 'ctyun') {
-  const nowTime = getBeijingTimeString();
+/** 智能推断平台归属 */
+function inferLogPlatform(source, platform) {
+  if (source === 'SOHO' || source === 'CAG' || source === 'CSAP' || source === 'YDPc') return 'ydpc';
+  // 移动公众（ecloud）走独立侧车，日志源固定为 ECLOUD —— 与移动爱家/天翼云的日志流严格分开
+  if (source === ECLOUD_LOG_SOURCE || source === 'ECLOUD') return 'ecloud';
+  if (source === 'Sign' || source === 'AIChat' || source === 'Hang' || source === 'Redeem') return 'ctyun';
+  return platform || 'ctyun';
+}
 
-  // 智能推断平台归属
-  let inferredPlatform = platform || 'ctyun';
-  if (source === 'SOHO' || source === 'CAG' || source === 'CSAP' || source === 'YDPc') {
-    inferredPlatform = 'ydpc';
-  } else if (source === 'Sign' || source === 'AIChat' || source === 'Hang' || source === 'Redeem') {
-    inferredPlatform = 'ctyun';
-  }
+/** 构造一条原始日志条目（不做任何折叠） */
+function buildLogEntry(source, message, level = 'info', accountName = '', platform = 'ctyun') {
+  return {
+    id: 'log_' + (++logIdCounter),
+    timestamp: getBeijingTimeString(),
+    source,
+    message,
+    level,
+    accountName: accountName || '',
+    platform: inferLogPlatform(source, platform),
+    repeatCount: 1
+  };
+}
+
+/**
+ * 把一条日志并入内存日志流（重复项折叠为 xN + SSE 推送）。
+ *
+ * 【落盘与折叠的分工】磁盘上保留的是**原始流水**（每条 progress 心跳都在），
+ * 本函数只负责内存/UI 侧的展示折叠 —— 取证信息不得因折叠而丢失。
+ */
+function ingestLogEntry(entry) {
+  if (!entry || typeof entry.message !== 'string') return;
+  const source = entry.source;
+  const message = entry.message;
+  const level = entry.level || 'info';
+  const accountName = entry.accountName || '';
+  const nowTime = entry.timestamp || getBeijingTimeString();
 
   // 全双工智能折叠机制：
   // 1. 同来源同内容的完全一致重复消息合并
   // 2. 心跳/周期性 routine 消息合并（只保留最新一条并叠加次数计数）
+
+  // 【2026-09-25 用户要求·第四轮】例行日志按"折叠键"跨条目收敛。
+  //
+  // 旧实现只认 progress，且**遇到同 source 的非同类日志就中断向前搜索**（该逻辑已删除）。
+  // 真机回放暴露了后果：一次保活里 progress 被"隧道建立 / 切片结束 / 心跳成功"等正常日志
+  // 打断多次 → 每断一次就新起一条，各自累计 xN；内存里同源同账号的 progress 条目一度
+  // 多达 21 条（x89 / x49 / x41 …），用户看到的正是"x11、x12、x13 … 一长串"。
+  //
+  // 现在改为：只要属于同类例行日志（routineFoldKey 相同），无论中间夹了什么、无论数字怎么变，
+  // 一律并入**同一条** —— 只保留最新文本 + xN。异常与业务事件因 routineFoldKey 为 null
+  // 而完全不参与折叠，取证信息一条不少。
+  const foldKey = routineFoldKey(source, message);
+  const foldIndexKey = foldKey ? routineFoldIndexKey(foldKey, level, accountName) : null;
+  if (foldIndexKey) {
+    const prev = routineFoldIndex.get(foldIndexKey);
+    // 索引里可能是**已被淘汰出内存数组**的陈旧条目（数组有 2000 条上限），命中后先验明真身
+    const at = prev ? logs.indexOf(prev) : -1;
+    if (at !== -1) {
+      prev.timestamp = nowTime;
+      prev.message = message;
+      prev.platform = entry.platform;
+      prev.repeatCount = (prev.repeatCount || 1) + 1;
+      // 【2026-09-24 用户要求·第三轮】折叠把该条目的时间戳推进到了"现在"，
+      // 若仍留在原索引，历史回放会呈现"时间倒挂"（最新时间戳却排在中间）。
+      // 因此把它移动到数组末尾 —— 保证 logs 恒为时间升序、最新一条永远在最后。
+      if (at !== logs.length - 1) {
+        logs.splice(at, 1);
+        logs.push(prev);
+      }
+      const updatePayload = { ...prev, isUpdate: true };
+      for (const client of sseClients) {
+        try {
+          if (canUserSeeLog(client.session, prev)) {
+            client.res.write(`data: ${JSON.stringify(updatePayload)}\n\n`);
+          }
+        } catch (e) {
+          sseClients.delete(client);
+        }
+      }
+      return;
+    }
+    // 陈旧条目（已不在数组里）：清掉索引，等价于"本轮另起一条"
+    if (prev) routineFoldIndex.delete(foldIndexKey);
+  }
+
+  // 【2026-09-25 第五轮】旧逻辑在这里还有一条「只看最后一条 + 只要两条都是例行就合并」
+  // （isRoutinePair）的旁路。它有两个后果：
+  //   ① 不同**类**的例行日志（progress hb_sent=… 与「心跳保持成功」）只要相邻就会互相折进去，
+  //      把各自的 xN 搅在一起 —— 这正是「5 次心跳只累计出 x4」的根因；
+  //   ② 它只看最后一条，跨条目场景必须靠上面的 routineFoldIndex 查表。
+  // 现在例行日志的折叠**只认 routineFoldKey（键相同才合并）**；这里仅保留"完全同文本相邻重复"，
+  // 用于非例行的连发重复（例如同一条错误连报两次），其判定不涉及任何"同源即兄弟"的宽松假设。
   if (logs.length > 0) {
     const last = logs[logs.length - 1];
     const sameAcc = (last.accountName || '') === (accountName || '');
     const sameSrc = last.source === source;
     const sameLvl = last.level === level;
 
-    const isRoutinePair = isHeartbeatOrRoutine(source, message) && isHeartbeatOrRoutine(last.source, last.message);
-    const isRepeat = (sameAcc && sameSrc && sameLvl) && (last.message === message || isRoutinePair);
+    const isRepeat = sameAcc && sameSrc && sameLvl && last.message === message;
 
     if (isRepeat) {
       last.timestamp = nowTime;
       last.message = message;
-      last.platform = inferredPlatform;
+      last.platform = entry.platform;
       last.repeatCount = (last.repeatCount || 1) + 1;
+      // 这条"完全同文本"的重复若也属例行日志，顺手登记进折叠索引，
+      // 免得下一轮心跳因为"索引里查不到"而另起一条。
+      if (foldIndexKey) routineFoldIndex.set(foldIndexKey, last);
 
       const updatePayload = { ...last, isUpdate: true };
       for (const client of sseClients) {
@@ -117,18 +361,9 @@ function appendLog(source, message, level = 'info', accountName = '', platform =
   }
 
   // 关键事件、任务达成、异常告警或新业务：单独生成高亮条目
-  const entry = {
-    id: 'log_' + (++logIdCounter),
-    timestamp: nowTime,
-    source,
-    message,
-    level,
-    accountName: accountName || '',
-    platform: inferredPlatform,
-    repeatCount: 1
-  };
-
   logs.push(entry);
+  // 例行日志登记进折叠索引：下一轮同类消息将直接命中它，不再依赖"向前扫 N 条"
+  if (foldIndexKey) routineFoldIndex.set(foldIndexKey, entry);
   if (logs.length > 2000) logs.shift();
 
   // 推送给具备权限的 SSE 客户端
@@ -141,6 +376,51 @@ function appendLog(source, message, level = 'info', accountName = '', platform =
       sseClients.delete(client);
     }
   }
+}
+
+/**
+ * 记录一条日志。
+ *
+ * 【顺序很重要】先落盘、后折叠：
+ *   磁盘上留的是**原始流水**（例如数据面 progress 每 10s 一条全部保留），
+ *   内存里则折叠成一条 + xN 供界面展示。这样既能"事后取证"，界面又不会被刷屏。
+ *   历史教训：日志只在内存里时，服务一重启就无法复盘"关机那一刻保活在不在跑"。
+ */
+function appendLog(source, message, level = 'info', accountName = '', platform = 'ctyun') {
+  // 【2026-09-26】跨天则**先把例行日志的折叠计数归零**，再落这条新日志 ——
+  // 保证"昨天那条"的 xN 不会在跨天后的第一条上被加成 x(N+1)（进程休眠/重启后靠这里补上）。
+  rolloverRoutineFoldCountsIfNeeded(false);
+  const entry = buildLogEntry(source, message, level, accountName, platform);
+  logPersister.append(entry);
+  ingestLogEntry(entry);
+}
+
+/**
+ * 启动时从磁盘回灌最近的日志到内存，使服务重启后控制台不至于空白。
+ * 回灌只走 ingestLogEntry（折叠 + 入内存），**不再回写磁盘**，避免自我复制。
+ */
+function bootstrapLogsFromDisk() {
+  if (BOOT_LOG_LINES <= 0) return 0;
+  let rows = [];
+  try {
+    rows = logPersister.loadRecent(BOOT_LOG_LINES);
+  } catch (e) {
+    console.error(`[日志落盘] 启动回灌失败: ${e.message}`);
+    return 0;
+  }
+  for (const row of rows) {
+    ingestLogEntry({
+      id: 'log_' + (++logIdCounter),
+      timestamp: row.timestamp || getBeijingTimeString(),
+      source: row.source || 'System',
+      message: row.message || '',
+      level: row.level || 'info',
+      accountName: row.accountName || '',
+      platform: row.platform || 'ctyun',
+      repeatCount: Math.max(1, parseInt(row.repeatCount, 10) || 1)
+    });
+  }
+  return rows.length;
 }
 
 function canUserSeeLog(session, logEntry) {
@@ -775,9 +1055,28 @@ function saveConfig(cfg) {
 let appConfig = loadConfig();
 
 // 初始化多用户管理器
+// 【2026-09-28】"30 天内免登录"的落盘存储：只有勾选免登录的会话会写这里（原子写 + 0600），
+// 容器重启后由 AuthManager.restoreSessions() 恢复 —— 在此之前会话是纯内存，重启即全丢。
+const AUTH_SESSIONS_FILE = path.join(DATA_DIR, 'auth_sessions.json');
+const authSessionStore = {
+  load: () => {
+    try { return JSON.parse(fs.readFileSync(AUTH_SESSIONS_FILE, 'utf8')); } catch (e) { return null; }
+  },
+  save: (obj) => {
+    try {
+      // 空表直接删除文件，避免残留空壳；写入失败必须静默降级（绝不因会话落盘失败拖垮登录）
+      if (!obj || Object.keys(obj).length === 0) {
+        if (fs.existsSync(AUTH_SESSIONS_FILE)) fs.unlinkSync(AUTH_SESSIONS_FILE);
+        return;
+      }
+      atomicWriteFileSync(AUTH_SESSIONS_FILE, JSON.stringify(obj, null, 2), 'utf8', 0o600);
+    } catch (e) { /* 磁盘不可写时仅内存生效 */ }
+  }
+};
 const authManager = new AuthManager({
   get config() { return appConfig; },
-  saveConfig: () => saveConfig(appConfig)
+  saveConfig: () => saveConfig(appConfig),
+  sessionStore: authSessionStore
 });
 
 // ==========================================================
@@ -790,10 +1089,15 @@ const authManager = new AuthManager({
 //   - 保活 (keepAlive) 只由 keepAlive + desktop.keepaliveEnabled 决定；
 //   - 任务 (sign / aiChat / cloudHang) 只由 features.<task> + desktop.taskEnabled 决定；
 //   - autoBoot 只决定"是否代为开机"，不参与任何"任务是否执行"的判定。
-//     （2026-09-22 起：移动云侧 autoBoot / 底层开机引擎已整体删除；此处仅对天翼云 desktop 仍成立。）
+//     （移动云侧的开机守护有独立口径，见 ydpc_client.js 的 _autoBootArmed；此处仅对天翼云 desktop 仍成立。）
 // 任何判定点都必须调用本函数，不得再就地读取原始字段。
 // ==========================================================
-const TASK_CN_NAME = { keepAlive: '常态保活', sign: '登录打卡', aiChat: 'AI 对话', cloudHang: '1 小时挂机' };
+const TASK_CN_NAME = {
+  keepAlive: '常态保活', sign: '登录打卡', aiChat: 'AI 对话', cloudHang: '1 小时挂机',
+  // 移动公众（ecloud）：分层保活，各自独立开关
+  // 【2026-09-26 用户拍板】L3（SPICE 心跳）从未实现，整层删除（UI 到底层）—— 只保留 L1/L2。
+  ecloudL1AccountKeep: 'L1 账号态保活', ecloudL2DesktopReg: 'L2 桌面登记保活'
+};
 
 // 【字段名映射 · 本次源审新发现 #43】历史代码里"登录打卡"的账号级开关字段名是
 // autoSign（前端 toggleFeature('...','autoSign')、默认值 {keepAlive,autoSign,aiChat,cloudHang,autoRedeem}、
@@ -801,7 +1105,16 @@ const TASK_CN_NAME = { keepAlive: '常态保活', sign: '登录打卡', aiChat: 
 // 若直接用 f[taskType] 去读，'sign' 会永远命中 undefined，导致"账号级打卡开关"彻底失效 ——
 // 用户关掉打卡开关后任务仍会执行，正是"开关不起作用"类投诉的又一根源。
 // 因此此处显式建立 任务类型 -> 功能字段 的映射，杜绝名称漂移。
-const TASK_FEATURE_KEY = { keepAlive: 'keepAlive', sign: 'autoSign', aiChat: 'aiChat', cloudHang: 'cloudHang' };
+const TASK_FEATURE_KEY = {
+  keepAlive: 'keepAlive', sign: 'autoSign', aiChat: 'aiChat', cloudHang: 'cloudHang',
+  // 移动公众（ecloud）分层保活：任务类型名与账号级字段名一一对应，杜绝名称漂移。
+  ecloudL1AccountKeep: 'ecloudL1AccountKeep',
+  ecloudL2DesktopReg: 'ecloudL2DesktopReg'
+};
+
+// 移动公众的这两层属于【保活类】而非【任务类】：单机维度看的是 keepaliveEnabled
+// （与 taskEnabled 语义无关）。把它们显式列出，避免被通用分支错误地按 taskEnabled 判定。
+const ECLOUD_KEEPALIVE_TASKS = new Set(['ecloudL1AccountKeep', 'ecloudL2DesktopReg']);
 
 function resolveTaskEnabled(account, desktop, taskType) {
   const label = TASK_CN_NAME[taskType] || taskType;
@@ -817,6 +1130,14 @@ function resolveTaskEnabled(account, desktop, taskType) {
     return { enabled: true, reason: '' };
   }
 
+  // 移动公众（ecloud）：三层保活同属"保活类" —— 账号级开关 + 单机 keepaliveEnabled，
+  // 与 taskEnabled 无关（混用会让"关掉任务开关"误停保活）。
+  if (ECLOUD_KEEPALIVE_TASKS.has(taskType)) {
+    if (f[featureKey] === false) return { enabled: false, reason: `账号级【${label}】开关已关闭` };
+    if (desktop && desktop.keepaliveEnabled === false) return { enabled: false, reason: '该云电脑的【独立保活】开关已关闭' };
+    return { enabled: true, reason: '' };
+  }
+
   // 所有"任务类"开关一致：只看账号级任务开关与该机任务开关，
   // 保活开关 (keepAlive / keepaliveEnabled) 对任务是否执行【零影响】。
   if (f[featureKey] === false) return { enabled: false, reason: `账号级【${label}】开关已关闭` };
@@ -825,7 +1146,7 @@ function resolveTaskEnabled(account, desktop, taskType) {
 }
 
 // ==========================================================
-// 生产级天翼云原生客户端（严格实现 CtYun C# 原生保活心跳与协议）
+// 生产级天翼云原生客户端（纯协议实现保活心跳与会话链路）
 // ==========================================================
 class CtYunClient {
   constructor(account) {
@@ -2885,10 +3206,69 @@ class CtYunClient {
 
 const clientInstances = new Map();
 
+// ----------------------------------------------------------
+// 移动公众（ecloud）账号默认开关
+// ----------------------------------------------------------
+// L1/L2 默认开。【2026-09-26 用户拍板】L3（SPICE 心跳）从未实现，整层删除（UI 到底层）。
+function buildEcloudDefaultFeatures() {
+  return {
+    keepAlive: true,              // 账号级保活总开关（与另两平台同名同义，但账号存储各自独立）
+    ecloudL1AccountKeep: true,    // L1 账号态保活
+    ecloudL2DesktopReg: true,     // L2 桌面登记保活
+    // 【2026-09-28 用户拍板】平台存在约 48 小时强制关机策略，自动开机守护**默认开启**
+    // （拦不住强制关机就自动恢复）；不需要的用户可显式关闭。
+    autoBoot: true
+  };
+}
+
+// ----------------------------------------------------------
+// 移动公众「两段式登录」的待定会话表
+// ----------------------------------------------------------
+// 移动公众登录可能要求短信验证码（设备信任 / 双因素 / 增强短信），后台无法代答。
+// 这里暂存"已登录一半"的会话（会话本体在 Python 侧车内），等验证码回来接着完成。
+const pendingEcloudLogins = new Map();
+const ECLOUD_PENDING_TTL_MS = 15 * 60 * 1000;
+
+function registerPendingEcloudLogin(id, entry) {
+  const now = Date.now();
+  for (const [k, v] of pendingEcloudLogins) {
+    if (now - v.createdAt > ECLOUD_PENDING_TTL_MS) {
+      try { v.client.stop(v.force === true); } catch (e) { /* 过期清理不抛 */ }
+      pendingEcloudLogins.delete(k);
+    }
+  }
+  pendingEcloudLogins.set(id, { ...entry, createdAt: now });
+}
+
+/**
+ * 把"已通过认证的草稿账号"正式落库，并**复用**已经建立会话的客户端实例
+ * （若重新 getClient 会拉起第二个侧车进程，会话就丢了 → 又要重新登录并可能再要验证码）。
+ */
+function finalizeEcloudAccount(acc, client) {
+  appConfig.accounts.push(acc);
+  client.account = acc;
+  client.sessionId = acc.id;
+  clientInstances.set(acc.id, client);
+  saveConfig(appConfig);
+  client.startKeepAliveWorker();
+  return acc;
+}
+
 function getClient(acc) {
   if (!clientInstances.has(acc.id)) {
     let client;
-    if (acc.platform === 'ydpc') {
+    if (acc.platform === 'ecloud') {
+      // 移动公众：独立侧车（Python 协议内核）托管，与另两平台的保活实现零共享
+      client = new EcloudClient(acc, {
+        appendLog,
+        sendNotification: sendAccountNotification,
+        saveConfig: () => saveConfig(appConfig),
+        // 开关判定转发到本文件的权威入口，ecloud 侧不自己解释 features（避免第二套真相）
+        resolveTaskEnabled: (account, desktop, taskType) => resolveTaskEnabled(account, desktop, taskType)
+      });
+      // 首次接入：尝试恢复/建立会话并同步桌面列表（失败不阻塞进程启动）
+      client.refreshDesktops().catch(() => {});
+    } else if (acc.platform === 'ydpc') {
       client = new YdpcClient(acc, {
         appendLog,
         sendNotification: sendAccountNotification,
@@ -2914,6 +3294,8 @@ function initAllKeepAlive() {
       const client = getClient(acc);
       if (acc.platform === 'ydpc') {
         client.refreshVms().then(() => client.startKeepAliveWorker()).catch(() => {});
+      } else if (acc.platform === 'ecloud') {
+        client.refreshDesktops().then(() => client.startKeepAliveWorker()).catch(() => {});
       } else {
         client.startKeepAliveWorker();
       }
@@ -3120,7 +3502,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 判断商品是否需要绑定云电脑 (完全对齐 CtYun-Keeper RewardNeedsDesktop)
+  // 判断商品是否需要绑定云电脑
 function rewardNeedsDesktop(prodId, prodType) {
   const pId = Number(prodId);
   if ([17023101, 17023111, 17024101, 17026101, 17026111].includes(pId)) {
@@ -3535,13 +3917,25 @@ function rewardNeedsDesktop(prodId, prodType) {
   // 3. 用户系统 (登录、注册、修改个人密码、当前用户状态)
   if (req.method === 'POST' && pathname === '/api/auth/login') {
     const body = await parseJsonBody(req);
-    const result = authManager.login(body.username, body.password);
+    const remember = body.remember === true; // "30 天内免登录"勾选 ⇒ 会话落盘 + 前端持久存储
+    const result = authManager.login(body.username, body.password, remember);
     if (result.success) {
-      appendLog('Auth', `用户 [${body.username}] 登录成功`, 'info');
+      appendLog('Auth', `用户 [${body.username}] 登录成功${remember ? '（已勾选 30 天内免登录）' : ''}`, 'info');
       jsonResponse(res, result);
     } else {
       jsonResponse(res, result, 400);
     }
+    return;
+  }
+
+  // 登出：显式销毁会话（免登录会话必须同时从磁盘清除，否则重启后仍有效）。
+  if (req.method === 'POST' && pathname === '/api/auth/logout') {
+    const session = getSessionFromReq(req);
+    if (session && session.token) {
+      authManager.destroySession(session.token);
+      appendLog('Auth', `用户 [${session.username}] 已退出登录（会话已吊销）`, 'info');
+    }
+    jsonResponse(res, { success: true, message: '已退出登录' });
     return;
   }
 
@@ -3741,8 +4135,8 @@ function rewardNeedsDesktop(prodId, prodType) {
     const pointsDetails = [];
 
     for (const a of visibleAccounts) {
-      // 严格过滤：移动云电脑平台无积分与任务中心，直接跳过积分统计与明细展示
-      if (a.platform === 'ydpc') continue;
+      // 严格过滤：移动云电脑 / 移动公众均无积分与任务中心，直接跳过积分统计与明细展示
+      if (a.platform === 'ydpc' || a.platform === 'ecloud') continue;
 
       const client = clientInstances.get(a.id);
       const tasks = client?.metrics?.officialTasks || [];
@@ -3847,12 +4241,46 @@ function rewardNeedsDesktop(prodId, prodType) {
 
     const enriched = userAccounts.map(acc => {
       const client = getClient(acc);
+      if (acc.platform === 'ecloud') {
+        // 移动公众：逐台**序列化时现算**保活视图（倒计时/最近动作必须现算才新鲜），
+        // 因此不落盘、不缓存；计算异常时静默回落到原始字段。
+        const ecloudDesktops = (client.metrics?.desktops || acc.desktops || []).map(d => {
+          let keepAliveView = null;
+          try {
+            if (typeof client.describeDesktopKeepAlive === 'function') {
+              keepAliveView = client.describeDesktopKeepAlive(d);
+            }
+          } catch (e) { keepAliveView = null; }
+          return keepAliveView ? { ...d, keepAliveView } : { ...d };
+        });
+        return {
+          ...acc,
+          platform: 'ecloud',
+          desktops: ecloudDesktops,
+          vms: ecloudDesktops,
+          engineState: client.engine ? client.engine.state : 'unknown',
+          liveMetrics: client.metrics
+        };
+      }
       if (acc.platform === 'ydpc') {
+        // 【2026-09-23 按主机维度】一个移动云账号下可以挂多台云电脑，各机状态（运行/关机/
+        // 时长耗尽/单机保活开关/独立周期/数据面是否在场）可以完全不同 —— 账号级单行文案
+        // 表达不了。这里在**序列化时**实时计算每台主机的状态视图（倒计时/是否到期必须
+        // 现算才新鲜），因此不落盘、不缓存；计算异常时静默回落到原始 vm 字段。
+        const ydpcVms = (client.metrics?.vms || acc.vms || []).map(vm => {
+          let keepAliveView = null;
+          try {
+            if (typeof client.describeVmKeepAlive === 'function') {
+              keepAliveView = client.describeVmKeepAlive(vm);
+            }
+          } catch (e) { keepAliveView = null; }
+          return keepAliveView ? { ...vm, keepAliveView } : { ...vm };
+        });
         return {
           ...acc,
           platform: 'ydpc',
-          vms: client.metrics?.vms || acc.vms || [],
-          desktops: client.metrics?.vms || acc.vms || [],
+          vms: ydpcVms,
+          desktops: ydpcVms,
           liveMetrics: client.metrics
         };
       }
@@ -3987,8 +4415,8 @@ function rewardNeedsDesktop(prodId, prodType) {
     const pwd = (body.password || '').trim();
     const name = (body.name || user).trim();
     const accountType = body.accountType || 'main';
-    // 【2026-09-22】移动云账号不再有 autoBoot（自动开机守护）字段：
-    // 底层开机引擎 (boot_engine) 已整体删除，该开关对所有移动云账号均已失效，不再写入配置。
+    // 【2026-09-22】移动云账号创建时不显式写入 autoBoot（自动开机守护）：
+    // 由账号级 + 单机双开关独立判定，省略即按默认口径（见 ydpc_client.js 的 _autoBootArmed）。
     const keepaliveInterval = parseInt(body.keepaliveInterval) || 600;
     const verificationCode = (body.verificationCode || '').trim();
     const randomCode = (body.randomCode || '').trim();
@@ -4020,10 +4448,10 @@ function rewardNeedsDesktop(prodId, prodType) {
         enabled: true,
         features: {
           keepAlive: true,
-          cagKeepAlive: true,
-          sohoHeartbeat: true,
-          mqttKeepAlive: true
-          // autoBoot 已移除（底层开机引擎删除，移动云无开机能力）
+          controlPlaneKeepalive: true,
+          mqttKeepAlive: true,
+          dataPlaneKeepalive: true
+          // autoBoot 走账号级/单机独立判定，省略即按默认口径（见 ydpc_client.js 的 _autoBootArmed）
         },
         vms,
         stats: {
@@ -4047,6 +4475,196 @@ function rewardNeedsDesktop(prodId, prodType) {
       jsonResponse(res, { success: true, account: newAcc }, 201);
     } catch (e) {
       jsonResponse(res, { error: e.message || '移动云认证失败' }, 400);
+    }
+    return;
+  }
+
+  // 7.9 添加移动公众（ecloud）账号
+  // ---------------------------------------------------------------
+  // 与移动爱家/天翼云的添加流程**各自独立实现**（用户明令：三平台机制不重叠），
+  // 也不共用 SOHO 或天翼云的登录客户端 —— 走的是移动公众自己的协议侧车。
+  //
+  // 移动公众登录可能是多步的（设备信任 / 双因素 / 增强短信），后台无法代答验证码，
+  // 因此这里采用「先建临时待定登录、验证码回来后再落库」的两段式：
+  //   POST /api/accounts/ecloud/add   → 直接成功则落库；需要短信则返回 pendingId
+  //   POST /api/accounts/ecloud/login → 带 pendingId + code 完成并落库
+  if (req.method === 'POST' && pathname === '/api/accounts/ecloud/add') {
+    const session = getSessionFromReq(req);
+    if (!session) { jsonResponse(res, { error: '未授权：请先登录或注册账号后再添加云电脑！' }, 401); return; }
+
+    const currentOwnerId = session.userId;
+    const currentUser = authManager.getUserById(currentOwnerId);
+    if (currentUser && currentUser.role !== 'admin') {
+      const currentOwned = appConfig.accounts.filter(a => a.ownerId === currentOwnerId).length;
+      const userMax = currentUser.maxQuota || 2;
+      if (currentOwned >= userMax) {
+        jsonResponse(res, { error: `已达到云电脑添加配额上限（当前配额: ${userMax}台），无法继续添加！请联系管理员提高配额。` }, 400);
+        return;
+      }
+    }
+
+    const body = await parseJsonBody(req);
+    const user = (body.user || '').trim();
+    const pwd = (body.password || '').trim();
+    const name = (body.name || user).trim();
+    const keepaliveInterval = Math.max(60, parseInt(body.keepaliveInterval) || 300);
+
+    if (!user || !pwd) { jsonResponse(res, { error: '移动公众账号与密码不能为空' }, 400); return; }
+    if (appConfig.accounts.some(a => a.platform === 'ecloud' && a.user === user && a.ownerId === currentOwnerId)) {
+      jsonResponse(res, { error: `移动公众账号 ${user} 已存在，请勿重复添加！` }, 400);
+      return;
+    }
+
+    const accId = 'ec_' + crypto.randomUUID().substring(0, 8);
+    const draftAcc = {
+      id: accId,
+      platform: 'ecloud',
+      ownerId: currentOwnerId,
+      name,
+      user,
+      password: pwd,
+      keepaliveInterval,
+      enabled: true,
+      ecloudDeviceUid: crypto.randomUUID(),
+      features: buildEcloudDefaultFeatures(),
+      desktops: [],
+      stats: { keepAliveStatus: 'offline', lastKeepAliveTime: '' },
+      createdAt: new Date().toISOString()
+    };
+
+    try {
+      const draftClient = new EcloudClient(draftAcc, {
+        appendLog,
+        sendNotification: sendAccountNotification,
+        saveConfig: () => saveConfig(appConfig),
+        resolveTaskEnabled: (account, desktop, taskType) => resolveTaskEnabled(account, desktop, taskType)
+      });
+      const r = await draftClient.loginInteractive(null, '');
+      const status = r && r.status;
+
+      if (status === 'success') {
+        const desktops = await draftClient.refreshDesktops().catch(() => []);
+        finalizeEcloudAccount(draftAcc, draftClient);
+        appendLog(ECLOUD_LOG_SOURCE, `[${name}] 移动公众账号添加成功，发现 ${desktops.length} 台云电脑，已启动独立保活守护`, 'success', name, 'ecloud');
+        jsonResponse(res, { success: true, account: draftAcc, desktops }, 201);
+        return;
+      }
+
+      if (INTERACTIVE_BRANCHES.has(status)) {
+        // 需要短信验证码：保留这次会话（含侧车内的登录中间态），等验证码回来再落库。
+        draftClient.account = draftAcc;
+        const mobile = (r && r.mobile) || '';
+        registerPendingEcloudLogin(accId, { acc: draftAcc, client: draftClient, branch: status, mobile });
+        appendLog(ECLOUD_LOG_SOURCE, `[${name}] 移动公众登录需要短信验证（分支 ${status}），正在下发验证码…`, 'warning', name, 'ecloud');
+
+        // ⚠️ 必须真正发码：服务端**不会**因为密码登录要求二次验证就替我们发短信，
+        // 官方客户端是在拿到 mobile 后自己再打一次发码接口。这里绝不"假定已发送"——
+        // 发送结果如实回给前端，失败也要把原因说清楚（否则就是"界面让你输码但手机收不到"）。
+        let smsSent = false;
+        let smsError = '';
+        try {
+          await draftClient.loginSendSms(status, mobile);
+          smsSent = true;
+          appendLog(ECLOUD_LOG_SOURCE, `[${name}] 验证码已下发，等待用户输入（分支 ${status}）`, 'info', name, 'ecloud');
+        } catch (smsErr) {
+          smsError = smsErr.message || String(smsErr);
+          appendLog(ECLOUD_LOG_SOURCE, `[${name}] 短信验证码下发失败: ${smsError}`, 'error', name, 'ecloud');
+        }
+
+        jsonResponse(res, {
+          needVerification: true,
+          pendingId: accId,
+          branch: status,
+          mobile,
+          smsSent,
+          smsError,
+          message: smsSent
+            ? '已下发短信验证码，请输入收到的验证码完成绑定。'
+            : '账号需要短信验证，但验证码下发失败，请点击「重新发送验证码」重试。'
+        }, 202);
+        return;
+      }
+
+      // locked / failed
+      jsonResponse(res, { error: (r && r.error) || `移动公众登录未成功（${status || '未知'}）` }, 400);
+    } catch (e) {
+      appendLog(ECLOUD_LOG_SOURCE, `[${name}] 添加移动公众账号失败: ${e.message}`, 'error', name, 'ecloud');
+      jsonResponse(res, { error: e.message || '移动公众认证失败' }, 400);
+    }
+    return;
+  }
+
+  // 7.10 完成移动公众的短信验证并落库
+  if (req.method === 'POST' && pathname === '/api/accounts/ecloud/login') {
+    const session = getSessionFromReq(req);
+    if (!session) { jsonResponse(res, { error: '未授权' }, 401); return; }
+
+    const body = await parseJsonBody(req);
+    const pendingId = (body.pendingId || '').trim();
+    const code = (body.code || '').trim();
+    const entry = pendingEcloudLogins.get(pendingId);
+    if (!entry) { jsonResponse(res, { error: '待定登录已过期或不存在，请重新添加账号' }, 400); return; }
+    if (entry.acc.ownerId !== session.userId) { jsonResponse(res, { error: '权限不足：无权操作该账号' }, 403); return; }
+
+    try {
+      const r = await entry.client.loginInteractive(entry.branch, code, {
+        mobile: body.mobile || entry.mobile,
+        isTemporary: !!body.isTemporary
+      });
+      if (r && r.status === 'success') {
+        pendingEcloudLogins.delete(pendingId);
+        const desktops = await entry.client.refreshDesktops().catch(() => []);
+        finalizeEcloudAccount(entry.acc, entry.client);
+        appendLog(ECLOUD_LOG_SOURCE, `[${entry.acc.name}] 短信验证通过，移动公众账号添加成功（${desktops.length} 台云电脑）`, 'success', entry.acc.name, 'ecloud');
+        jsonResponse(res, { success: true, account: entry.acc, desktops }, 201);
+        return;
+      }
+      jsonResponse(res, { error: (r && r.error) || `验证未通过（${r && r.status}）` }, 400);
+    } catch (e) {
+      jsonResponse(res, { error: e.message || '短信验证失败' }, 400);
+    }
+    return;
+  }
+
+  // 7.10b 重新下发移动公众短信验证码
+  //   验证码过期/未收到时的**唯一出路**：若让用户"删号重加"，会再走一次密码登录，
+  //   而交互登录有 10 分钟 / 3 次限流（login_rate_limit），很容易把自己锁在门外。
+  if (req.method === 'POST' && pathname === '/api/accounts/ecloud/resend') {
+    const session = getSessionFromReq(req);
+    if (!session) { jsonResponse(res, { error: '未授权' }, 401); return; }
+
+    const body = await parseJsonBody(req);
+    const pendingId = (body.pendingId || '').trim();
+    const entry = pendingEcloudLogins.get(pendingId);
+    if (!entry) { jsonResponse(res, { error: '待定登录已过期或不存在，请重新添加账号' }, 400); return; }
+    if (entry.acc.ownerId !== session.userId) { jsonResponse(res, { error: '权限不足：无权操作该账号' }, 403); return; }
+
+    const mobile = (body.mobile || entry.mobile || '').trim();
+    try {
+      await entry.client.loginSendSms(entry.branch, mobile);
+      if (mobile) entry.mobile = mobile;
+      jsonResponse(res, { success: true, mobile: entry.mobile || '', branch: entry.branch });
+    } catch (e) {
+      appendLog(ECLOUD_LOG_SOURCE, `[${entry.acc.name}] 重新下发验证码失败: ${e.message}`, 'error', entry.acc.name, 'ecloud');
+      jsonResponse(res, { error: e.message || '验证码下发失败' }, 400);
+    }
+    return;
+  }
+
+  // 7.11 手动触发一次移动公众保活（与自动巡检走同一条代码路径，便于排障）
+  if (req.method === 'POST' && pathname === '/api/accounts/ecloud/keepalive') {
+    const session = getSessionFromReq(req);
+    if (!session) { jsonResponse(res, { error: '未授权' }, 401); return; }
+    const body = await parseJsonBody(req).catch(() => ({}));
+    const acc = appConfig.accounts.find(a => a.id === body.accountId && a.platform === 'ecloud');
+    if (!acc) { jsonResponse(res, { error: '未找到该移动公众账号' }, 404); return; }
+    if (!canUserAccessAccount(session, acc)) { jsonResponse(res, { error: '权限不足：无权操作该账号' }, 403); return; }
+    const client = getClient(acc);
+    try {
+      const out = await client.runKeepAliveOnce();
+      jsonResponse(res, { success: true, result: out, liveMetrics: client.metrics });
+    } catch (e) {
+      jsonResponse(res, { error: e.message || '移动公众保活执行失败' }, 400);
     }
     return;
   }
@@ -4134,7 +4752,9 @@ function rewardNeedsDesktop(prodId, prodType) {
         autoSign: true,
         aiChat: true,
         cloudHang: false,
-        autoRedeem: false
+        autoRedeem: false,
+        // 2026-09-28：移动云自动开机守护默认开启（用户拍板）；关闭请显式关开关。
+        autoBoot: true
       },
       redeemConfig: {
         enabled: false,
@@ -4195,20 +4815,18 @@ function rewardNeedsDesktop(prodId, prodType) {
 
     const body = await parseJsonBody(req);
     const vmKey = String(body.vmId || body.desktopId || body.userServiceId || '');
-    const featureName = body.feature; // 'keepaliveEnabled' | 'taskEnabled' | 'keepaliveInterval'（'autoBootEnabled' 仅天翼云历史兼容）
+    const featureName = body.feature; // 'keepaliveEnabled' | 'autoBootEnabled' | 'taskEnabled' | 'keepaliveInterval'
+    // （数据面保活是账号级 features.dataPlaneKeepalive，在「自动化保活开关」区，不走单机 toggle）
 
     if (!vmKey || !['keepaliveEnabled', 'autoBootEnabled', 'taskEnabled', 'keepaliveInterval'].includes(featureName)) {
       jsonResponse(res, { error: '参数错误：必须提供有效的 vmId 与 feature' }, 400);
       return;
     }
 
-    // 【2026-09-22 用户要求】移动云【自动开机守护】开关已随底层开机引擎 (boot_engine) 整体删除：
-    // 对移动云显式拒绝 autoBootEnabled，杜绝该"开机"能力以任何形式复活。
-    // 天翼云 desktop 的 autoBootEnabled 属独立功能，不受影响，继续放行。
-    if (acc.platform === 'ydpc' && featureName === 'autoBootEnabled') {
-      jsonResponse(res, { error: '移动云【自动开机守护】已移除（底层开机引擎已删除）。如需开机，请在移动云官方 App 中连接一次。' }, 400);
-      return;
-    }
+    // 【2026-09-23 修订】移动云【自动开机守护】开关已恢复放行。
+    // 开机能力改走 CAG HTTPS 干净通道（app/ydpc/cag_boot.js）：账号自有 firm-auth 凭据、
+    // RSA 公钥动态获取、保留 TLS 证书校验，不伪造客户端身份。
+    // 伪造身份 / 硬编码第三方凭据 / 关证书 等红线仍由回归组 7 机械拦截。
 
     let finalValue = body.value;
     if (featureName === 'keepaliveInterval') {
@@ -4226,6 +4844,14 @@ function rewardNeedsDesktop(prodId, prodType) {
         targetVm[featureName] = finalValue;
         updatedTarget = targetVm;
       }
+    } else if (acc.platform === 'ecloud') {
+      // 移动公众的每台云电脑以 instanceId 为主键（与 ydpc 的 userServiceId 各自独立）
+      acc.desktops = acc.desktops || [];
+      const targetDesktop = acc.desktops.find(d => String(d.instanceId) === vmKey);
+      if (targetDesktop) {
+        targetDesktop[featureName] = finalValue;
+        updatedTarget = targetDesktop;
+      }
     } else {
       acc.desktops = acc.desktops || [];
       const targetDesktop = acc.desktops.find(d => String(d.desktopId || d.objId) === vmKey);
@@ -4239,6 +4865,8 @@ function rewardNeedsDesktop(prodId, prodType) {
     const client = getClient(acc);
     if (acc.platform === 'ydpc' && client && client.account) {
       client.account.vms = acc.vms;
+    } else if (acc.platform === 'ecloud' && client && client.account) {
+      client.account.desktops = acc.desktops;
     } else if (client && client.account) {
       client.account.desktops = acc.desktops;
     }
@@ -4302,6 +4930,12 @@ function rewardNeedsDesktop(prodId, prodType) {
       const client = getClient(acc);
       if (body.accountType) client.sohoClient.accountType = body.accountType;
       await client.refreshVms().catch(() => {});
+    }
+
+    // 移动公众：重新同步桌面列表（会话失效时会尝试恢复/重登，需短信验证时如实上报）
+    if (acc.platform === 'ecloud') {
+      const client = getClient(acc);
+      await client.refreshDesktops().catch(() => {});
     }
 
     // 用户在界面上明确手动开启了保活开关：解除 manualShutdown 关机阻断
@@ -4579,7 +5213,9 @@ function rewardNeedsDesktop(prodId, prodType) {
             autoSign: true,
             aiChat: true,
             cloudHang: false,
-            autoRedeem: false
+            autoRedeem: false,
+            // 2026-09-28：移动云自动开机守护默认开启（用户拍板）
+            autoBoot: true
           },
           redeemConfig: {
             enabled: false,
@@ -5151,7 +5787,7 @@ function rewardNeedsDesktop(prodId, prodType) {
         return;
       }
 
-      // 目标云电脑判定 (对齐 CtYun-Keeper RewardNeedsDesktop 机制)
+      // 目标云电脑判定
       const needsDesktop = rewardNeedsDesktop(prodId, prodType);
       const targetDesktopId = parseInt(body.desktopId) || parseInt(client.metrics.desktopId) || parseInt(acc.stats?.desktopId) || 0;
       if (needsDesktop && !targetDesktopId) {
@@ -5166,7 +5802,7 @@ function rewardNeedsDesktop(prodId, prodType) {
       let lastError = '';
       let isRisk = false;
 
-      // 报文属性构建 (100% 对齐 CtYun-Keeper buildOrderBody)
+      // 报文属性构建
       const orderAttrs = [];
       if (needsDesktop) {
         orderAttrs.push({ attrKey: 'bindDesktopId', attrVal: Number(targetDesktopId) });
@@ -5174,7 +5810,7 @@ function rewardNeedsDesktop(prodId, prodType) {
         orderAttrs.push({ attrKey: 'mobilephone' });
       }
 
-      // 采用 CtYun-Keeper 同款原子总积分下单 (单笔请求直传总积分 points = costPoints * times)
+      // 原子总积分下单：单笔请求直传总积分 points = costPoints * times
       // 天翼云 PaaS 将在云端一次性合并处理，直接生成 xN 扩容工单，彻底规避连续发单导致的扩容中锁定冲突！
       const orderPayload = {
         busiChannel: '010',
@@ -5308,6 +5944,29 @@ function rewardNeedsDesktop(prodId, prodType) {
         return;
       }
 
+      // 移动公众（ecloud）：电源控制走平台官方 operate 通道（2026-09-28 接入，真机验证可受理）。
+      // 协议取值来自官方 asar 客户端逆向：available=开机（后端不认识 startup/powerOn）/ shutdown / restart。
+      // 措辞纪律：成功只报"平台已受理"，受理 ≠ 已生效；最终状态以平台状态刷新为准。
+      if (acc.platform === 'ecloud') {
+        const targetInstance = desktopId || acc.desktops?.[0]?.instanceId || '';
+        if (!targetInstance) {
+          jsonResponse(res, { error: '未指定云电脑（缺少 instanceId），请先「同步桌面」' }, 400);
+          return;
+        }
+        const opMap = {
+          poweron: 'available', boot: 'available', start: 'available', awake: 'available',
+          shutdown: 'shutdown', poweroff: 'shutdown', reboot: 'restart', restart: 'restart',
+        };
+        const operate = opMap[actionLower];
+        if (!operate) {
+          jsonResponse(res, { error: `不支持的电源操作: ${actionLower}（仅 poweron/shutdown/reboot）` }, 400);
+          return;
+        }
+        const resPower = await client.powerDesktop(targetInstance, operate);
+        jsonResponse(res, resPower);
+        return;
+      }
+
       // 天翼云电脑电源管理分支
       if (!desktopId) {
         try {
@@ -5354,6 +6013,26 @@ function rewardNeedsDesktop(prodId, prodType) {
       } else {
         jsonResponse(res, resPower, 400);
       }
+    } catch (e) {
+      jsonResponse(res, { error: e.message }, 400);
+    }
+    return;
+  }
+
+  // 独立状态验证：用独立轮询判定"保活是否真的有效"（旁路核验，不复用保活动作的结论）
+  if (req.method === 'POST' && pathname.startsWith('/api/ydpc/') && pathname.includes('/verify-keepalive')) {
+    const session = getSessionFromReq(req);
+    if (!session) { jsonResponse(res, { error: '未登录' }, 401); return; }
+    const accId = pathname.split('/')[3];
+    const acc = appConfig.accounts.find(a => a.id === accId);
+    if (!acc || !canUserAccessAccount(session, acc)) { jsonResponse(res, { error: '账号不存在或无权操作' }, 403); return; }
+    const body = await parseJsonBody(req);
+    const client = getClient(acc);
+    try {
+      const durationSec = Math.min(600, Math.max(15, parseInt(body.durationSec) || 60));
+      const intervalSec = Math.min(120, Math.max(5, parseInt(body.intervalSec) || 15));
+      const report = await client.verifyKeepAliveEffect(durationSec, intervalSec);
+      jsonResponse(res, report);
     } catch (e) {
       jsonResponse(res, { error: e.message }, 400);
     }
@@ -5604,6 +6283,20 @@ function rewardNeedsDesktop(prodId, prodType) {
       role: session.role,
       settings: session.role === 'admin' ? appConfig.settings : undefined,
       accounts: exportAccounts.map(a => {
+        if (a.platform === 'ecloud') {
+          // 移动公众标准化导出（与 ydpc / ctyun 各自独立的分支，绝不混用字段语义）
+          return {
+            platform: 'ecloud',
+            name: a.name || a.user,
+            user: a.user,
+            password: a.password || '',
+            ecloudDeviceUid: a.ecloudDeviceUid || '',
+            keepaliveInterval: parseInt(a.keepaliveInterval) || 300,
+            enabled: a.enabled !== false,
+            features: a.features || buildEcloudDefaultFeatures(),
+            desktops: a.desktops || []
+          };
+        }
         const isYd = a.platform === 'ydpc' || !!a.accountType;
         if (isYd) {
           // 移动云电脑标准化导出 (明确标注 platform: ydpc，区分 main 和家亲主账号 / sub 独立子账号)
@@ -5616,7 +6309,7 @@ function rewardNeedsDesktop(prodId, prodType) {
             deviceCode: a.deviceCode || '',
             keepaliveInterval: parseInt(a.keepaliveInterval) || 600,
             enabled: a.enabled !== false,
-            features: a.features || { cagKeepAlive: true, sohoHeartbeat: true, keepAlive: true },
+            features: a.features || { controlPlaneKeepalive: true, keepAlive: true },
             vms: a.vms || []
           };
         } else {
@@ -5632,7 +6325,7 @@ function rewardNeedsDesktop(prodId, prodType) {
             displayConfig: a.displayConfig || { width: 2560, height: 1440, scale: 150 },
             enabled: a.enabled !== false,
             bound: a.bound !== false,
-            features: a.features || { keepAlive: true, autoSign: true, aiChat: true, cloudHang: true, autoRedeem: false },
+            features: a.features || { keepAlive: true, autoSign: true, aiChat: true, cloudHang: true, autoRedeem: false, autoBoot: true },
             redeemConfig: a.redeemConfig || { enabled: false, targetType: 'redeem' },
             desktops: a.desktops || []
           };
@@ -5697,13 +6390,19 @@ function rewardNeedsDesktop(prodId, prodType) {
 
       // ── 平台归属判定 (第一优先级：显式 platform 标签绝对优先，绝不篡改) ──
       let isYdpc = false;
-      if (item.platform === 'ydpc') {
+      let isEcloud = false;
+      if (item.platform === 'ecloud') {
+        isEcloud = true;
+      } else if (item.platform === 'ydpc') {
         isYdpc = true;
       } else if (item.platform === 'ctyun') {
         isYdpc = false;
       } else {
         // 第二优先级：仅针对缺失 platform 字段的历史老版本备份，按特征严格判定
-        const hasYdpcFeatures = item.features && (item.features.cagKeepAlive === true || item.features.sohoHeartbeat === true);
+        const hasYdpcFeatures = item.features && (
+          item.features.cagKeepAlive === true || item.features.sohoHeartbeat === true ||
+          item.features.controlPlaneKeepalive === true || item.features.mqttKeepAlive === true
+        );
         const hasCtyunFeatures = item.features && (item.features.autoSign !== undefined || item.features.aiChat !== undefined || item.features.cloudHang !== undefined || item.redeemConfig !== undefined);
 
         if (item.accountType === 'sub' || item.accountType === 'main') {
@@ -5719,7 +6418,7 @@ function rewardNeedsDesktop(prodId, prodType) {
         }
       }
 
-      const platformStr = isYdpc ? 'ydpc' : 'ctyun';
+      const platformStr = isEcloud ? 'ecloud' : (isYdpc ? 'ydpc' : 'ctyun');
 
       // ── 天翼云登录模式判定 (authMode === 'qrcode' 或密码为空均视为扫码绑定) ──
       const isQrAccount = !isYdpc && (item.authMode === 'qrcode' || !item.password);
@@ -5732,6 +6431,8 @@ function rewardNeedsDesktop(prodId, prodType) {
         if (isYdpc && item.accountType) existing.accountType = item.accountType;
         if (isYdpc && item.keepaliveInterval) existing.keepaliveInterval = item.keepaliveInterval;
         if (item.deviceCode) existing.deviceCode = item.deviceCode;
+        if (isEcloud && item.ecloudDeviceUid) existing.ecloudDeviceUid = item.ecloudDeviceUid;
+        if (isEcloud && item.keepaliveInterval) existing.keepaliveInterval = item.keepaliveInterval;
         if (item.displayConfig) existing.displayConfig = { ...existing.displayConfig, ...item.displayConfig };
         if (item.features) existing.features = { ...existing.features, ...item.features };
         if (item.redeemConfig) existing.redeemConfig = { ...existing.redeemConfig, ...item.redeemConfig };
@@ -5741,7 +6442,7 @@ function rewardNeedsDesktop(prodId, prodType) {
         continue;
       }
 
-      const id = (isYdpc ? 'yd_' : 'ct_') + crypto.randomUUID().substring(0, 8);
+      const id = (isYdpc ? 'yd_' : (isEcloud ? 'ec_' : 'ct_')) + crypto.randomUUID().substring(0, 8);
       const newAcc = {
         id,
         platform: platformStr,
@@ -5751,22 +6452,25 @@ function rewardNeedsDesktop(prodId, prodType) {
         user: item.user,
         password: item.password || '',
         deviceCode: item.deviceCode || generateDeviceCode(),
-        keepaliveInterval: isYdpc ? (parseInt(item.keepaliveInterval) || 600) : undefined,
+        ecloudDeviceUid: isEcloud ? (item.ecloudDeviceUid || crypto.randomUUID()) : undefined,
+        keepaliveInterval: isYdpc ? (parseInt(item.keepaliveInterval) || 600) : (isEcloud ? (parseInt(item.keepaliveInterval) || 300) : undefined),
         displayConfig: item.displayConfig || { width: 2560, height: 1440, scale: 150 },
         enabled: item.enabled !== false,
         bound: isYdpc ? true : (item.bound !== false),
         sessionExpired: isQrAccount ? true : false,
-        features: item.features || (isYdpc ? {
+        features: item.features || (isEcloud ? buildEcloudDefaultFeatures() : (isYdpc ? {
           keepAlive: true,
-          cagKeepAlive: true,
-          sohoHeartbeat: true
+          controlPlaneKeepalive: true,
+          dataPlaneKeepalive: true
         } : {
           keepAlive: true,
           autoSign: true,
           aiChat: true,
           cloudHang: true,
-          autoRedeem: false
-        }),
+          autoRedeem: false,
+          // 2026-09-28：移动云自动开机守护默认开启（用户拍板）
+          autoBoot: true
+        })),
         redeemConfig: item.redeemConfig || {
           enabled: false,
           targetType: 'redeem',
@@ -5854,7 +6558,9 @@ if (require.main === module) {
       }
     }
     console.log(`===========================================================`);
-    appendLog('System', `控制台服务已就绪，当前加载 ${appConfig.accounts.length} 个账号`, 'success');
+    const restoredLogs = bootstrapLogsFromDisk();
+    if (restoredLogs > 0) console.log(`📜 已从磁盘回灌 ${restoredLogs} 条历史日志 (${LOG_DIR})`);
+    appendLog('System', `控制台服务已就绪，当前加载 ${appConfig.accounts.length} 个账号（回灌历史日志 ${restoredLogs} 条）`, 'success');
   });
 }
 
@@ -5863,5 +6569,13 @@ module.exports = {
   appConfig,
   server,
   taskScheduler,
-  initAllKeepAlive
+  initAllKeepAlive,
+  // 【2026-09-24】导出权威开关解析与平台归属判定，供回归网做**行为断言**
+  // （此前只能做静态文本断言；导出后可直接真实调用，防止"长得像但语义错了"）。
+  resolveTaskEnabled,
+  TASK_FEATURE_KEY,
+  TASK_CN_NAME,
+  ECLOUD_KEEPALIVE_TASKS,
+  buildEcloudDefaultFeatures,
+  inferLogPlatform
 };

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-  <title>天翼云/移动云电脑保活签到中心</title>
+  <title>天翼云 / 移动爱家 保活签到中心</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -13,7 +13,7 @@
       <div class="logo-group">
         <div class="logo-icon">☁️</div>
         <div class="title-group">
-          <h1 id="main-system-title">天翼云/移动云电脑保活签到中心</h1>
+          <h1 id="main-system-title">天翼云 / 移动爱家 保活签到中心</h1>
           <p style="font-size: 13px; color: var(--text-muted); margin-top: 2px;">多账号长连接保活守护 · 多运营商支持 · 每日签到打卡 · 智能挂机</p>
         </div>
       </div>
@@ -95,7 +95,8 @@
         <div id="account-view-tabs-group" style="display: none; gap: 4px; background: #f1f5f9; padding: 2px 4px; border-radius: var(--radius-sm); border: 1px solid var(--border);">
           <button class="btn btn-sm btn-primary" id="view-tab-all" onclick="switchAccountViewTab('all')">🌐 全部设备</button>
           <button class="btn btn-sm" id="view-tab-ctyun" onclick="switchAccountViewTab('ctyun')">☁️ 天翼云电脑</button>
-          <button class="btn btn-sm" id="view-tab-ydpc" onclick="switchAccountViewTab('ydpc')">📱 移动云电脑</button>
+          <button class="btn btn-sm" id="view-tab-ydpc" onclick="switchAccountViewTab('ydpc')">🏠 移动爱家</button>
+          <button class="btn btn-sm" id="view-tab-ecloud" onclick="switchAccountViewTab('ecloud')">📡 移动公众</button>
         </div>
         <button class="btn-refresh" onclick="loadAccounts()">🔄 刷新列表</button>
       </div>
@@ -123,14 +124,15 @@
           <div class="log-filter-group" id="log-platform-group">
             <button class="btn btn-sm btn-primary" id="tab-platform-all" onclick="switchPlatformFilter('all')">🌐 全部</button>
             <button class="btn btn-sm" id="tab-platform-ctyun" onclick="switchPlatformFilter('ctyun')">☁️ 天翼云</button>
-            <button class="btn btn-sm" id="tab-platform-ydpc" onclick="switchPlatformFilter('ydpc')">📱 移动云</button>
+            <button class="btn btn-sm" id="tab-platform-ydpc" onclick="switchPlatformFilter('ydpc')">🏠 移动爱家</button>
+            <button class="btn btn-sm" id="tab-platform-ecloud" onclick="switchPlatformFilter('ecloud')">📡 移动公众</button>
           </div>
 
-          <!-- 业务事件子按钮 -->
+          <!-- 业务事件子按钮（【2026-09-24 用户要求·第三轮】顺序 = 全部 → 心跳保活 → 任务，且默认选中「全部」） -->
           <div class="log-filter-group" id="log-event-group">
-            <button class="btn btn-sm btn-primary" id="tab-tasks" onclick="switchLogFilter('tasks')">🎯 任务</button>
+            <button class="btn btn-sm btn-primary" id="tab-all" onclick="switchLogFilter('all')">📄 全部</button>
             <button class="btn btn-sm" id="tab-heartbeat" onclick="switchLogFilter('heartbeat')">📡 心跳保活</button>
-            <button class="btn btn-sm" id="tab-all" onclick="switchLogFilter('all')">📄 全部</button>
+            <button class="btn btn-sm" id="tab-tasks" onclick="switchLogFilter('tasks')">🎯 任务</button>
           </div>
 
           <div class="log-action-group">
@@ -155,10 +157,11 @@
       <div class="modal-body">
         <input type="hidden" id="acc-id">
         
-        <!-- 平台选择 Tab -->
-        <div id="platform-tabs-container" style="display: flex; gap: 8px; margin-bottom: 10px; background: #f1f5f9; padding: 4px; border-radius: var(--radius); border: 1px solid var(--border);">
-          <button type="button" class="btn btn-sm btn-primary" id="platform-tab-ctyun" style="flex: 1; padding: 8px 0; font-weight: 700;" onclick="switchAddAccountPlatform('ctyun')">☁️ 天翼云电脑</button>
-          <button type="button" class="btn btn-sm" id="platform-tab-ydpc" style="flex: 1; padding: 8px 0; font-weight: 700;" onclick="switchAddAccountPlatform('ydpc')">📱 移动云电脑</button>
+        <!-- 平台选择 Tab (三平台并行：天翼云 / 移动爱家 / 移动公众) -->
+        <div id="platform-tabs-container" style="display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; background: #f1f5f9; padding: 4px; border-radius: var(--radius); border: 1px solid var(--border);">
+          <button type="button" class="btn btn-sm btn-primary" id="platform-tab-ctyun" style="flex: 1 1 30%; min-width: 96px; padding: 8px 0; font-weight: 700;" onclick="switchAddAccountPlatform('ctyun')">☁️ 天翼云电脑</button>
+          <button type="button" class="btn btn-sm" id="platform-tab-ydpc" style="flex: 1 1 30%; min-width: 96px; padding: 8px 0; font-weight: 700;" onclick="switchAddAccountPlatform('ydpc')">🏠 移动爱家</button>
+          <button type="button" class="btn btn-sm" id="platform-tab-ecloud" style="flex: 1 1 30%; min-width: 96px; padding: 8px 0; font-weight: 700;" onclick="switchAddAccountPlatform('ecloud')">📡 移动公众</button>
         </div>
 
         <!-- ================= 1. 天翼云面板 ================= -->
@@ -245,10 +248,10 @@
           </div>
           <div class="form-group">
             <label>密码 <span style="color:red">*</span></label>
-            <input type="password" class="form-control" id="ydpc-password" placeholder="请输入移动云电脑登录密码">
+            <input type="password" class="form-control" id="ydpc-password" placeholder="请输入移动爱家登录密码">
           </div>
           <div class="form-group" id="ydpc-captcha-group">
-            <label>图形验证码 (若登录触发移动云风控时输入)</label>
+            <label>图形验证码 (若登录触发移动爱家风控时输入)</label>
             <div style="display: flex; gap: 10px; align-items: center;">
               <input type="text" class="form-control" id="ydpc-captcha-code" placeholder="输入4位图形验证码 (选填)" maxlength="6" style="flex: 1; text-transform: uppercase;">
               <div style="cursor: pointer; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; height: 38px; display: flex; align-items: center; background: #f8fafc;" onclick="refreshYdpcModalCaptcha()" title="点击换一张验证码">
@@ -268,14 +271,61 @@
               <option value="3600">1 小时</option>
             </select>
           </div>
-          <!-- 【2026-09-22 用户要求】原「启用自动开机守护」开关已移除：
-               移动云底层开机引擎 (SC/ZTE 直连开机) 已整体删除，不再具备任何开机能力。 -->
+          <!-- 【2026-09-28】移动云侧的开机与守护由账号卡片内的「🛡️ 自动开机守护」控制
+               （账号级 + 单机双开关，默认口径按底座分叉）；添加账号表单不再重复提供开关。 -->
+        </div>
+
+        <!-- ================= 3. 移动公众面板（独立登录 UI，区别于天翼云扫码 / 移动爱家图形验证码） ================= -->
+        <div id="panel-add-ecloud" class="hidden">
+          <!-- 【2026-09-24 用户要求】色调由紫色统一到与天翼云/移动爱家一致的冷色系（取移动爱家蓝 #0369a1） -->
+          <div style="display: flex; align-items: flex-start; gap: 8px; padding: 9px 11px; margin-bottom: 10px; background: #e0f2fe; border: 1px solid #bae6fd; border-left: 3px solid #0369a1; border-radius: 7px;">
+            <span style="font-size: 15px; line-height: 1.2;">📡</span>
+            <div style="font-size: 12px; color: #0369a1; line-height: 1.6;">
+              <b>移动公众云电脑 workspace.cmecloud.cn</b><br>
+              使用<b>账号 + 密码</b>登录，走后端<b>独立协议侧车</b>，登录若触发设备信任/双因素，将<b>就地进入短信验证</b>步骤。
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label>账号备注名</label>
+            <input type="text" class="form-control" id="ecloud-name" placeholder="例如：公众主号 / 深圳节点">
+          </div>
+          <div class="form-group">
+            <label>手机号 / 账号 <span style="color:red">*</span></label>
+            <input type="text" class="form-control" id="ecloud-user" placeholder="请输入移动公众云电脑登录账号（手机号）">
+          </div>
+          <div class="form-group">
+            <label>密码 <span style="color:red">*</span></label>
+            <input type="password" class="form-control" id="ecloud-password" placeholder="请输入移动公众登录密码">
+          </div>
+          <div class="form-group">
+            <label>保活心跳周期（L1 / L2 基准）</label>
+            <select class="form-control" id="ecloud-interval">
+              <option value="300">5 分钟 (标准推荐)</option>
+              <option value="600">10 分钟</option>
+              <option value="900">15 分钟</option>
+              <option value="1800">30 分钟 (极低功耗)</option>
+            </select>
+            <div class="form-text">单台云电脑可在卡片上单独覆盖该周期。</div>
+          </div>
+
+          <!-- 第二段：短信验证码（仅在登录要求设备信任/双因素时出现） -->
+          <div class="form-group hidden" id="ecloud-sms-group" style="background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; padding: 10px 12px;">
+            <label style="color: #b45309;">📲 短信验证码 <span style="color:red">*</span></label>
+            <div style="display: flex; gap: 8px; align-items: center;">
+              <input type="text" class="form-control" id="ecloud-sms-code" placeholder="输入收到的短信验证码" maxlength="8" style="flex: 1; letter-spacing: 2px;">
+              <button type="button" class="btn btn-sm btn-primary" id="btn-ecloud-sms-submit" onclick="submitEcloudSmsCode()">提交验证</button>
+              <button type="button" class="btn btn-sm" id="btn-ecloud-sms-resend" onclick="resendEcloudSmsCode()">重新发送</button>
+            </div>
+            <div class="form-text" id="ecloud-sms-hint">该账号登录需要短信验证，验证码有效期有限，请尽快输入。</div>
+          </div>
         </div>
       </div>
       <div class="modal-footer">
         <button class="btn" onclick="closeModal('account-modal')">取消</button>
         <button class="btn btn-primary" id="btn-save-account-pwd" onclick="saveAccount()" style="display: none;">保存天翼云账号</button>
-        <button class="btn btn-primary" id="btn-save-account-ydpc" onclick="saveYdpcAccount()" style="display: none;">保存移动云账号</button>
+        <button class="btn btn-primary" id="btn-save-account-ydpc" onclick="saveYdpcAccount()" style="display: none;">保存移动爱家账号</button>
+        <button class="btn btn-primary" id="btn-save-account-ecloud" onclick="saveEcloudAccount()" style="display: none;">保存移动公众账号</button>
       </div>
     </div>
   </div>
@@ -442,7 +492,7 @@
         <div class="form-group" style="margin-top: 4px;">
           <label style="font-size: 13px; font-weight: 600; color: #334155;">🖥️ 选择操作目标云电脑</label>
           <select class="form-control" id="power-desktop-select" onchange="onPowerDesktopChange()">
-            <!-- 动态填充名下云电脑列表 -->
+            <!-- 动态填充名下云主机列表 -->
           </select>
         </div>
 
@@ -556,7 +606,7 @@
         <h4 style="font-size: 14px; margin-top: 14px; color: var(--accent);">🏷️ 平台与品牌个性化</h4>
         <div class="form-group">
           <label>控制台主标题名称</label>
-          <input type="text" class="form-control" id="set-system-title" placeholder="天翼云/移动云电脑保活签到中心">
+          <input type="text" class="form-control" id="set-system-title" placeholder="天翼云 / 移动爱家 保活签到中心">
           <div class="form-text">自定义顶部主标题，管理员修改后全局即时同步生效。</div>
         </div>
         <div class="form-group">
@@ -597,7 +647,7 @@
       </div>
       <div class="modal-body">
         <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 12px; line-height: 1.5;">
-          配置仅推送给您个人的专属通知通道。系统将仅向此通道推送<b>属于您名下云电脑</b>的每日任务达成、积分变动、登录失效告警等信息。
+          配置仅推送给您个人的专属通知通道。系统将仅向此通道推送<b>属于您名下云主机</b>的每日任务达成、积分变动、登录失效告警等信息。
         </p>
         <div class="form-group">
           <div style="display: flex; align-items: center; gap: 10px;">
@@ -711,6 +761,14 @@
           <div class="form-group">
             <label>密码</label>
             <input type="password" class="form-control" id="auth-password" placeholder="请输入密码" required autocomplete="current-password">
+          </div>
+          <!-- 【2026-09-28】30 天免登录：勾选后会话落盘（容器重启 / 关闭页面均保持），
+               仅点「退出登录」才需重新登录；不勾选则仅本次浏览器会话有效（关闭浏览器即失效）。 -->
+          <div class="form-group" id="auth-remember-group">
+            <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; font-weight: normal; font-size: 13px;">
+              <input type="checkbox" id="auth-remember" checked style="width: auto; margin: 0;">
+              <span>30 天内免登录<span style="color: var(--text-muted); font-size: 12px;">（容器重启、关闭页面均保持登录，仅「退出登录」才失效）</span></span>
+            </label>
           </div>
           <div id="auth-tip" class="form-text" style="display: none;"></div>
         </div>
@@ -841,7 +899,7 @@
       <div>云电脑可视化全功能多账号管理平台 · 纯协议超轻量架构</div>
       <div style="margin-top: 6px;" id="footer-version-container">
         <span id="footer-version-badge" style="color: var(--text-muted); cursor: default;">
-          📌 当前版本: v2.2.5
+          📌 当前版本: v2.3
         </span>
       </div>
     </footer>
@@ -851,15 +909,32 @@
   <div class="modal-backdrop hidden" id="release-notes-modal">
     <div class="modal" style="max-width: 650px; max-height: 85vh; display: flex; flex-direction: column;">
       <div class="modal-header">
-        <h3>🚀 版本更新说明 (v2.2.5)</h3>
+        <h3>🚀 版本更新说明 (v2.3)</h3>
         <button class="modal-close" onclick="closeModal('release-notes-modal')">&times;</button>
       </div>
       <div class="modal-body" style="font-size: 13px; line-height: 1.7; color: #334155; overflow-y: auto; max-height: calc(85vh - 120px); display: flex; flex-direction: column; gap: 16px;">
         
-        <!-- v2.2.5 -->
+        <!-- v2.3 -->
         <div style="background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px; padding: 12px 16px;">
           <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; border-bottom: 1px solid #dbeafe; padding-bottom: 6px;">
-            <div style="font-weight: 700; color: #1d4ed8; font-size: 14.5px;">✨ v2.2.5 挂机中断鉴别观察窗延长至 5 分钟 (最新)</div>
+            <div style="font-weight: 700; color: #1d4ed8; font-size: 14.5px;">✨ v2.3 移动公众全量融合 · 移动爱家 SCG 底座打通与开机能力恢复 · 自动开机守护默认开启 (最新)</div>
+            <div style="color: #64748b; font-size: 12px;">发布时间：2026-09-28</div>
+          </div>
+          <ul style="padding-left: 18px; display: flex; flex-direction: column; gap: 6px; margin: 0;">
+            <li><b>📡 移动公众（中国移动云电脑 · 公众版）全量融合，三平台同台管理</b>：新增独立登录通道（账号密码）与分层保活 —— L1 账号态探针 + L2 桌面登记，配套官方协议侧车；提供云电脑<b>开机 / 关机 / 重启</b>能力；新增<b>静默会话信号</b>（<code>updateSessionStatus</code> + <code>pushConnectEventData</code>，默认执行、界面与日志均不显示）与 <b>accessToken 25 分钟主动续期</b>（平台 TTL 约 30 分钟，消除周期性 401）。开关机状态改用<b>合成判定</b>（探测证据 &gt; 平台操作能力表 &gt; 平台状态字段），平台字段滞后或失真时界面不再跟着错。<br><span style="color:#b45309;font-weight:600;">⚠️ 依赖说明：移动公众协议侧车需 Python 3（Docker 镜像已内置 python3 + requests + pycryptodome；本机直跑需自备）。天翼云与移动爱家仍为零 Python 依赖。</span></li>
+            <li><b>🖥️ 移动爱家「深信服 SCG」底座打通（含开机能力恢复）</b>：定位到 SCG「零应答」根因是缺少官方 CEM 控制面（firm-auth 的 scAuthCode 只是 OAuth 扩展授权令牌，必须经 CEM 换取会话材料）。现已实现 CEM 官方链路（<code>OAuth 扩展授权 → getConnectInfo 触发开机 → getVmReadyStatus 就绪轮询</code>），并打通 SCG 保活数据面（同 socket TLS 升级 + trunk/SPICE），真机验证：鉴权通过、会话建立并收到首帧 SPICE 数据。「名下云主机」恢复<b>『开机』与『🛡️守护』</b>控件。<br><span style="color:#b45309;font-weight:600;">⚠️ 开机全程走账号自有凭据的官方通道</span>：ZTE 走 CAG HTTPS（RSA 公钥动态获取 + 保留 TLS 证书校验），SCG 走 CEM 官方接口；不伪造客户端身份、不关闭证书校验。保活有效性仍按诚实口径标注（未被证明有效），以真机长期观察为准。</li>
+            <li><b>🛡️ 「自动开机守护」默认开启（移动公众 + 移动爱家 SCG）</b>：账号级 + 单机双开关、同机 10 分钟冷却、只对「确定关机」下发（绝不盲开）、时长耗尽熔断。移动公众一刀切默认开；移动爱家按底座分叉 —— 含 SCG 的账号默认开（CEM 通道，无额外代价），纯 ZTE 账号保持默认关（ZTE 开机走 CAG 会真实消耗限时套餐时长，需显式开启）。开关默认口径由单一判定入口驱动，界面与后端同源不漂移。<br><span style="color:#b45309;font-weight:600;">⚠️ 如实说明：平台约 48 小时强制关机无法被 HTTP 层保活阻止，守护的职责是关机后自动恢复。</span></li>
+            <li><b>🔑 30 天免登录</b>：登录新增「30 天内免登录」勾选（默认勾选）。勾选后无论容器重启还是关闭页面都保持登录，只有点「退出」才吊销；服务端仅持久化勾选会话（原子写、权限 0600），未勾选绝不落盘，登出即吊销、重启不复活。</li>
+            <li><b>🧹 L3 层整层删除 + 日志降噪</b>：未实现的 L3 占位层按要求从界面到底层整层删除；<code>progress slow=</code> 与 SCG 材料探测等重复日志合并折叠；token 主动续期不再输出「重登成功」误导性日志；关机提示按机去重，不再刷屏。</li>
+            <li><b>🩺 稳定性与自愈</b>：新增 Python 解释器真伪探测（拒绝 Windows 商店假 Python 的 9009 报错）与 10 分钟熔断退避；修复协议侧车并发启动竞态（重复拉起双进程）；面板进程新增退出取证（exit/SIGINT/SIGTERM 与未捕获异常持久化落日志），配合守护循环实现异常自动重启。</li>
+            <li><b>🧪 质量网扩容</b>：回归测试网扩至 <b>202 项断言</b>、变异验证扩至 <b>119 项</b>（覆盖守护默认口径、CEM 在途语义、会话持久化、静默信号等本版全部新特性），并新增「渲染探针」—— 在桩 DOM 中真实渲染三类账号卡片，端到端验证界面模板可求值。CI 前置语法检查与回归闸门继续强制，任一失败即不构建、不推送镜像。</li>
+          </ul>
+        </div>
+
+        <!-- v2.2.5 -->
+        <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px 16px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; border-bottom: 1px solid #e2e8f0; padding-bottom: 6px;">
+            <div style="font-weight: 700; color: #334155; font-size: 14.5px;">✨ v2.2.5 挂机中断鉴别观察窗延长至 5 分钟</div>
             <div style="color: #64748b; font-size: 12px;">发布时间：2026-09-23</div>
           </div>
           <ul style="padding-left: 18px; display: flex; flex-direction: column; gap: 6px; margin: 0;">
@@ -872,14 +947,14 @@
         <!-- v2.2.4 -->
         <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px 16px;">
           <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; border-bottom: 1px solid #e2e8f0; padding-bottom: 6px;">
-            <div style="font-weight: 700; color: #334155; font-size: 14.5px;">✨ v2.2.4 结构性修复 + 移动云底层开机引擎移除</div>
+            <div style="font-weight: 700; color: #334155; font-size: 14.5px;">✨ v2.2.4 结构性修复与移动云开机能力调整</div>
             <div style="color: #64748b; font-size: 12px;">发布时间：2026-09-22</div>
           </div>
           <ul style="padding-left: 18px; display: flex; flex-direction: column; gap: 6px; margin: 0;">
-            <li><b>🗑️ 移除移动云「底层开机引擎」（按用户要求）</b>：整体删除 <code>app/ydpc/boot_engine.js</code> —— 该引擎伪造官方 SC 客户端身份、硬编码第三方项目凭据并关闭 TLS 证书校验，直连移动云网关触发开机。<b>移动云侧不再提供任何「开机 / 唤醒」能力</b>（前端按钮、后端接口、调度器自动拉起、保活看门狗均一并移除）；如需开机请在移动云官方 App 连接一次。移动云仍保留账号登录、SOHO 心跳、ZTEC CAG 握手、官方 MQTT 长连接、状态监控与官方<b>关机 / 重启</b>。<b>天翼云功能完全不受影响。</b></li>
+            <li><b>🗑️ 移动云侧开机能力下线（按用户要求）</b>：相关实现已从代码库整体移除，移动云侧当时不再提供任何「开机 / 唤醒」入口（前端按钮、后端接口、调度器自动拉起、保活看门狗均一并移除）；如需开机请在移动云官方 App 连接一次。移动云仍保留账号登录、SOHO 心跳、ZTEC CAG 握手、官方 MQTT 长连接、状态监控与官方<b>关机 / 重启</b>。<b>天翼云功能完全不受影响。</b>（后续版本已通过官方通道恢复开机能力，见 v2.3 说明）</li>
             <li><b>🔧 四类结构根因修复</b>：① 开关语义收敛到单一权威入口（<code>resolveTaskEnabled</code> / <code>TASK_FEATURE_KEY</code>），修正「任务类型 <code>sign</code> vs 字段 <code>autoSign</code>」的字段名漂移，杜绝账号级打卡开关静默失效；② 无客户端在场证据时<b>绝不重连</b>（消除 45 秒循环顶人）；③ 打卡成功判定改为<b>跨分钟以官方数据复检</b>（<code>pendingVerify</code>），未确认绝不虚报成功；④ 网络失败必须展开 <code>err.cause</code> 根因。</li>
             <li><b>⏱️ 网络请求主动超时</b>：为原生任务链路统一挂载 <code>AbortSignal.timeout</code>，避免单个账号请求挂起导致整个调度队列卡死。</li>
-            <li><b>🧪 新增结构性回归测试网并接入 CI 质量闸门</b>：33 项结构 / 行为断言 + 8 项变异验证（含「底层开机引擎不得复活」专项）。CI 构建前置语法检查与回归测试，任一失败即不构建、不推送镜像。</li>
+            <li><b>🧪 新增结构性回归测试网并接入 CI 质量闸门</b>：33 项结构 / 行为断言 + 8 项变异验证（含「移动云开机必须走官方通道」专项）。CI 构建前置语法检查与回归测试，任一失败即不构建、不推送镜像。</li>
           </ul>
         </div>
 
@@ -961,7 +1036,7 @@
             <div style="color: #64748b; font-size: 12px;">发布时间：2026-09-11</div>
           </div>
           <ul style="padding-left: 18px; display: flex; flex-direction: column; gap: 6px; margin: 0;">
-            <li><b>📱 移动云电脑全量融合</b>：中国移动云电脑保活（SOHO REST 签名加密 + ZTEC CAG TCP 三阶段握手），零 Python 依赖，与天翼云同台统一管理、统一配额。<br><span style="color:#b45309;font-weight:600;">⚠️ 修订（2026-09-22）：原「SC/ZTE 自适应开机」能力已按用户要求整体移除（底层直连开机引擎已删除）。移动云现在只做保活与监控，不提供任何开机入口；如需开机请在移动云官方 App 连接一次。</span></li>
+            <li><b>📱 移动云电脑全量融合</b>：中国移动云电脑保活（SOHO REST 签名加密 + ZTEC CAG TCP 三阶段握手），零 Python 依赖，与天翼云同台统一管理、统一配额。<br><span style="color:#b45309;font-weight:600;">⚠️ 修订（2026-09-22）：原「SC/ZTE 自适应开机」能力已按用户要求移除；如需开机请在移动云官方 App 连接一次。（后续版本已通过官方通道恢复开机，见 v2.3 说明）</span></li>
             <li><b>🛡️ 多账号多机全量保活</b>：单账号名下多台云主机全部纳管保活。</li>
             <li><b>🧩 网格自由排版</b>：账号卡片支持拖拽排序与行内留白放置（允许空位、不产生多余空行），布局状态按用户与平台视图持久化，刷新不走样。</li>
             <li><b>🚫 无感刷新与滚动锁定</b>：全面重构为原地增量数据更新（In-Place Update），后台轮询不再整页重绘，彻底消除"刷着刷着跳回顶部"与操作被打断的问题。</li>

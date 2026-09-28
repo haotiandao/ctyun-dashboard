@@ -125,14 +125,28 @@ function buildZtecStage3Radius(destHost, destPort, username, password, clientKey
  * 执行中兴 CAG TCP 三阶段握手与连接保持
  */
 async function performCagAuthHold(firmAuth, holdSeconds = 3, timeoutMs = 15000) {
+  // 【2026-09-26 修复·"没材料"被伪装成"DNS 故障"】
+  // 旧写法 `String(firmAuth.cagIp || firmAuth.cagHost)`：两者皆空时得到的是**字面量 "undefined"**，
+  // 于是真的去解析一个名叫 "undefined" 的主机 ⇒ 现场日志 `getaddrinfo ENOTFOUND undefined`，
+  // 再被 classifyZteError 按 /ENOTFOUND|getaddrinfo/ 判成 **hard** ⇒ 每轮打一条 error 级告警。
+  // 实情是"这台机器根本没有 CAG 材料"（见 product_route.js 的现场样本：SCG 机 cagIp/cagPort
+  // 全空），与网络无关。⇒ 必须在**拨号之前**明确拒绝，并带上机器可读的错误码，
+  // 让调用方按"本次没做事"处理，而不是当成链路故障。
+  const a = firmAuth || {};
+  const cagHostRaw = String(a.cagIp || a.cagHost || '').trim();
+  if (!cagHostRaw) {
+    const err = new Error('该机器未下发 CAG 连接材料（cagIp 缺失），本次不发起 CAG 握手');
+    err.code = 'CAG_MATERIAL_MISSING';
+    return Promise.reject(err);
+  }
   return new Promise((resolve, reject) => {
-    const cagHost = String(firmAuth.cagIp || firmAuth.cagHost);
-    const cagPort = Number(firmAuth.cagPort || 8899);
-    const vmcHost = String(firmAuth.vmcIp || firmAuth.vmcHost || cagHost);
-    const vmcPort = Number(firmAuth.vmcPort || firmAuth.cagPort || 8899);
-    const vmUserName = String(firmAuth.vmUserName || '');
-    const vmPassword = String(firmAuth.vmPassword || '');
-    const vmId = String(firmAuth.vmId || '');
+    const cagHost = cagHostRaw;
+    const cagPort = Number(a.cagPort || 8899);
+    const vmcHost = String(a.vmcIp || a.vmcHost || cagHost);
+    const vmcPort = Number(a.vmcPort || a.cagPort || 8899);
+    const vmUserName = String(a.vmUserName || '');
+    const vmPassword = String(a.vmPassword || '');
+    const vmId = String(a.vmId || '');
 
     const clientKey = crypto.randomBytes(4).readUInt32LE(0);
     const socket = new net.Socket();

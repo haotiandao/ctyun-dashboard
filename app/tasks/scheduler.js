@@ -132,7 +132,7 @@ class TaskScheduler {
     // 判断是否存在"未被分项 Cron 管辖"的待补跑任务 (全部被管辖时补跑引擎直接休眠)
     let anyUngovernedTask = false;
     for (const acc of accounts) {
-      if (!acc.enabled || acc.platform === 'ydpc') continue;
+      if (!acc.enabled || acc.platform === 'ydpc' || acc.platform === 'ecloud') continue;
       const f = acc.features || {};
       if ((this.taskGate(acc, 'sign') && !subCronMap.sign) ||
           (this.taskGate(acc, 'aiChat') && !subCronMap.aiChat) ||
@@ -152,6 +152,7 @@ class TaskScheduler {
     for (const acc of accounts) {
       if (!acc.enabled) continue;
       if (acc.platform === 'ydpc') continue; // 移动云保活为常态巡检，无需达成度判定
+      if (acc.platform === 'ecloud') continue; // 移动公众保活为常态巡检，无官方任务达成度可言
       const f = acc.features || {};
       const client = this.getClient(acc);
       try {
@@ -407,7 +408,7 @@ class TaskScheduler {
     } else if (targetTimes.includes(currentHm) && this.lastCompletedDate !== todayStr) {
       // 辅助规则未配置该项，按主时间点兜底
       for (const acc of accounts) {
-        if (this.taskGate(acc, 'cloudHang') && acc.platform !== 'ydpc') {
+        if (this.taskGate(acc, 'cloudHang') && acc.platform !== 'ydpc' && acc.platform !== 'ecloud') {
           const client = this.getClient(acc);
           executeNativeHang(client, acc, (src, msg, lvl) => this.appendLog(src, `[${acc.name}] ${msg}`, lvl)).catch(() => {});
         }
@@ -429,7 +430,7 @@ class TaskScheduler {
     } else if (targetTimes.includes(currentHm) && this.lastCompletedDate !== todayStr) {
       // 辅助规则未配置该项，按主时间点兜底 (兑换仍受自身策略日限制约，由完整流程内判定)
       for (const acc of accounts) {
-        if (acc.features?.autoRedeem && acc.platform !== 'ydpc') {
+        if (acc.features?.autoRedeem && acc.platform !== 'ydpc' && acc.platform !== 'ecloud') {
           const client = this.getClient(acc);
           client.getRewards().catch(() => {});
         }
@@ -474,31 +475,60 @@ class TaskScheduler {
       const accSummary = { name: acc.name, sign: false, aiChat: false, hang: false };
 
       // 移动云电脑 (YDPc) 独立调度分支：仅执行 SOHO 心跳与 CAG TCP 握手保活
-      // 【2026-09-22 用户要求】原"关机自动拉起"已随底层开机引擎 (boot_engine) 一并移除，
+      // 【2026-09-22 用户要求】原"关机自动拉起"已移除（自动开机守护改由客户端侧按双开关独立判定），
       // 本分支不再下发任何电源指令。
       if (acc.platform === 'ydpc') {
         try {
-          this.appendLog('Scheduler', `[${acc.name}] 正在执行移动云电脑例行保活巡检...`, 'info', acc.name, 'ydpc');
+          this.appendLog('Scheduler', `[${acc.name}] 正在执行移动爱家例行保活巡检...`, 'info', acc.name, 'ydpc');
           if (client.refreshVms) await client.refreshVms();
           const vms = acc.vms || client.metrics?.vms || [];
           for (const vm of vms) {
             if (vm.keepaliveEnabled !== false) {
-              if (acc.features?.sohoHeartbeat !== false && client.sendHeartbeat) {
+              // 【2026-09-23 合并】SOHO 心跳与 CAG 握手共用一个"控制面保活"开关
+              if (acc.features?.controlPlaneKeepalive !== false && client.sendHeartbeat) {
                 await client.sendHeartbeat(vm.userServiceId).catch(() => {});
               }
-              if (acc.features?.cagKeepAlive !== false && client.pingCag) {
+              if (acc.features?.controlPlaneKeepalive !== false && client.pingCag) {
                 await client.pingCag(vm.userServiceId, 3).catch(() => {});
               }
             }
           }
         } catch (err) {
-          this.appendLog('Scheduler', `[${acc.name}] 移动云保活巡检异常: ${err.message}`, 'error', acc.name, 'ydpc');
+          this.appendLog('Scheduler', `[${acc.name}] 移动爱家保活巡检异常: ${err.message}`, 'error', acc.name, 'ydpc');
         }
 
         // 账号间防风控随机退避
         if (i < accounts.length - 1) {
           const accountJitterMs = Math.floor(Math.random() * 8000) + 3000;
           await new Promise(r => setTimeout(r, accountJitterMs));
+        }
+        continue;
+      }
+
+      // 移动公众（ecloud）独立调度分支
+      // ----------------------------------------------------------
+      // 保活由 EcloudClient 自己的看护循环按「账号级开关 + 单机独立周期」执行，
+      // 这里**只做幂等收敛**（确保看护在跑 / 关了要停），绝不重复下发一次保活 ——
+      // 否则就会与看护循环形成第二套下发真相（这正是历史缺陷的形态）。
+      if (acc.platform === 'ecloud') {
+        try {
+          // 开关判定一律走 taskGate（统一入口）—— 绝不就地读 acc.features.keepAlive
+          const on = this.taskGate(acc, 'keepAlive', client);
+          if (on && !client.workerRunning) {
+            this.appendLog('Scheduler', `[${acc.name}] 移动公众保活看护未在运行，正在拉起...`, 'info', acc.name, 'ecloud');
+            client.startKeepAliveWorker();
+          } else if (!on && client.workerRunning) {
+            this.appendLog('Scheduler', `[${acc.name}] 移动公众账号级保活已关闭，停止看护循环`, 'info', acc.name, 'ecloud');
+            client.stopKeepAliveWorker();
+          }
+        } catch (err) {
+          this.appendLog('Scheduler', `[${acc.name}] 移动公众保活看护检查异常: ${err.message}`, 'error', acc.name, 'ecloud');
+        }
+
+        // 账号间防风控随机退避
+        if (i < accounts.length - 1) {
+          const jitterMs = Math.floor(Math.random() * 8000) + 3000;
+          await new Promise(r => setTimeout(r, jitterMs));
         }
         continue;
       }
@@ -611,7 +641,7 @@ class TaskScheduler {
               if (shouldRedeem) {
                 const prodType = rConf.prodType || 'pointstplupgrade';
                 const pId = Number(rConf.prodId);
-                // 判断商品是否需要绑定云电脑 (完全对齐 CtYun-Keeper RewardNeedsDesktop)
+                // 判断商品是否需要绑定云电脑
                 const needsDesktop = [17023101, 17023111, 17024101, 17026101, 17026111].includes(pId) ||
                   ['pointstplupgrade', 'pointsdiskupgrade'].includes(String(prodType).toLowerCase().trim());
 
@@ -627,7 +657,7 @@ class TaskScheduler {
                   let lastMsg = '';
                   let isRisk = false;
 
-                  // 报文属性构建 (100% 对齐 CtYun-Keeper buildOrderBody)
+                  // 报文属性构建
                   const orderAttrs = [];
                   if (needsDesktop) {
                     orderAttrs.push({ attrKey: 'bindDesktopId', attrVal: Number(targetDesktopId) });
@@ -635,7 +665,7 @@ class TaskScheduler {
                     orderAttrs.push({ attrKey: 'mobilephone' });
                   }
 
-                  // 采用 CtYun-Keeper 同款原子总积分下单 (单笔请求直传总积分 points = costPoints * times)
+                  // 原子总积分下单：单笔请求直传总积分 points = costPoints * times
                   // 天翼云 PaaS 将在云端一次性合并处理，直接生成 xN 扩容工单，彻底规避连续发单导致的扩容中锁定冲突！
                   const payload = {
                     busiChannel: '010',

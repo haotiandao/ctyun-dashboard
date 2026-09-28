@@ -14,13 +14,38 @@ const ROOT = path.resolve(__dirname, '..');
 
 const FILES = [
   'server.js',
+  'app/persist_log.js',
   'app/tasks/native_tasks.js',
   'app/tasks/scheduler.js',
   'app/ydpc/ydpc_client.js',
+  'app/ydpc/product_route.js',
+  'app/ydpc/cag_boot.js',
+  'app/ydpc/zte_cag_raw.js',
+  'app/ydpc/zte_cag_tls.js',
+  'app/ydpc/scg_keepalive.js',
+  'app/ecloud/ecloud_engine.js',
+  'app/ecloud/ecloud_client.js',
   'app/static/app.js',
 ];
 
 let failed = 0;
+
+// 【自检】关键运行时文件必须留在清单里 —— 防止重构时被误删，导致语法闸门"看不见"它。
+// 教训：变异验证曾因清单漂移而退化成假 PASS（见 tests/mutation_check.js 的 2026-09-23 修复）。
+const REQUIRED = [
+  'server.js',
+  'app/ydpc/product_route.js',
+  'app/ydpc/zte_cag_tls.js',
+  'app/ydpc/scg_keepalive.js',
+  'app/ecloud/ecloud_engine.js',
+  'app/ecloud/ecloud_client.js',
+];
+for (const f of REQUIRED) {
+  if (!FILES.includes(f)) {
+    console.error(`语法闸门自检失败：关键文件未登记进 FILES —— ${f}`);
+    process.exit(1);
+  }
+}
 
 for (const f of FILES) {
   const abs = path.join(ROOT, f);

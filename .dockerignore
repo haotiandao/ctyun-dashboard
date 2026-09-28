@@ -6,3 +6,13 @@ data/*
 !data/.gitkeep
 test*
 *.tmp
+
+# 移动公众协议凭据（方案 B 外置）：绝不进镜像
+app/ecloud_engine/credentials.json
+**/__pycache__
+*.pyc
+
+# 本地分析产物 / 会话记录 / 本地记忆：不进镜像
+analysis
+.workbuddy
+.workbuddy-ai

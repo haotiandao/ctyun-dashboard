@@ -1,6 +1,6 @@
 /**
  * 移动云电脑 - 原生轻量级 MQTT 3.1.1 over TLS 长连接保活客户端
- * (100% 纯 Node.js 内置 tls 模块实现，零外部依赖，对齐官方 UOS 客户端与 cmcc-cloud-alive 规范)
+ * (100% 纯 Node.js 内置 tls 模块实现，零外部依赖，对齐官方 UOS 客户端规范)
  */
 
 const tls = require('tls');

@@ -9,6 +9,34 @@ const BASE_URL = 'https://soho.komect.com';
 const VERSION = '2.18.21';
 const VERSION_NUM = '2182100';
 
+// ============================================================================
+// 【2026-09-23 关键修复】SOHO 网关请求必须带**主动超时**
+//
+// 本文件原先 3 处 fetch 全是裸调用（零超时）。Node fetch(undici) 的默认超时是
+// headers 300s / body 300s —— 一次"连上但不回包"的网络抖动就能让单个请求静默挂 5 分钟。
+// 而移动云保活循环把 `await refreshVms()` 串在**每轮开头**，refreshVms 内部又可能串行
+// 发起 4~5 个 SOHO 请求（bootstrap 公钥 → 登录公钥 → 登录 → 云电脑列表）→ 一次抖动即可
+// 让该账号下**所有主机**的保活静默停摆 20~30 分钟：没有错误、没有日志、lastKeepAliveAt 冻结。
+//
+// 因此所有出网请求一律走 fetchWithTimeout（默认 15s，可经 CTYUN_SOHO_TIMEOUT_MS 覆盖）。
+// ============================================================================
+const SOHO_TIMEOUT_MS = Math.max(1000, parseInt(process.env.CTYUN_SOHO_TIMEOUT_MS, 10) || 15000);
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = SOHO_TIMEOUT_MS) {
+  try {
+    return await fetch(url, { ...options, signal: AbortSignal.timeout(timeoutMs) });
+  } catch (e) {
+    if (e && (e.name === 'TimeoutError' || e.name === 'AbortError')) {
+      const err = new Error(`移动爱家网关请求超时 (${timeoutMs}ms，未收到响应): ${url}`);
+      err.code = 'SOHO_TIMEOUT';
+      err.timeoutMs = timeoutMs;
+      err.cause = e;
+      throw err;
+    }
+    throw e;
+  }
+}
+
 const HEADER_ORDER = [
   'X-SOHO-AppKey',
   'X-SOHO-AppType',
@@ -158,7 +186,7 @@ class SohoClient {
     }
 
     const url = `${BASE_URL}/terminal${path}`;
-    const res = await fetch(url, {
+    const res = await fetchWithTimeout(url, {
       method,
       headers: outgoingHeaders,
       body: sendBody
@@ -169,7 +197,7 @@ class SohoClient {
     try {
       result = JSON.parse(rawText);
     } catch (e) {
-      throw new Error(`移动云网关响应异常 (HTTP ${res.status})`);
+      throw new Error(`移动爱家网关响应异常 (HTTP ${res.status})`);
     }
 
     // 自动重登机制：若 SOHO 判定 token 过期或用户未登录 (如 code 4001, 4003, 1000100)
@@ -206,7 +234,7 @@ class SohoClient {
       if (v !== '') outgoingHeaders[k] = v;
     }
 
-    const res = await fetch(`${BASE_URL}/terminal${path}`, {
+    const res = await fetchWithTimeout(`${BASE_URL}/terminal${path}`, {
       method: 'POST',
       headers: outgoingHeaders,
       body: null
@@ -246,7 +274,7 @@ class SohoClient {
         randomCode: res.data.randomCode || ''
       };
     }
-    throw new Error(res.msg || '获取移动云验证码失败');
+    throw new Error(res.msg || '获取移动爱家验证码失败');
   }
 
   async login(username, password, accountType = 'main', verificationCode = '', randomCode = '') {
@@ -308,13 +336,13 @@ class SohoClient {
       } catch (e) {}
     }
 
-    throw new Error(mainRes.msg || `移动云登录失败 (code ${mainRes.code})`);
+    throw new Error(mainRes.msg || `移动爱家登录失败 (code ${mainRes.code})`);
   }
 
   async listCloudPcs() {
     const res = await this.fetchApi('/cc/cloudPc/list/v6', { pageNum: 1 });
     if (res.code !== 2000 || !res.data) {
-      throw new Error(res.msg || `获取移动云电脑列表失败 (code ${res.code})`);
+      throw new Error(res.msg || `获取移动爱家电脑列表失败 (code ${res.code})`);
     }
 
     const list = res.data.list || [];
@@ -438,7 +466,7 @@ class SohoClient {
       }
 
       const pointUrl = `https://point.soho.komect.com/point${path}`;
-      const res = await fetch(pointUrl, {
+      const res = await fetchWithTimeout(pointUrl, {
         method: 'POST',
         headers: outgoingHeaders,
         body: sendBody
@@ -504,5 +532,7 @@ module.exports = {
   genDeviceId,
   buildSign,
   rsaEncryptBody,
-  rsaEncryptPassword
+  rsaEncryptPassword,
+  fetchWithTimeout,
+  SOHO_TIMEOUT_MS
 };

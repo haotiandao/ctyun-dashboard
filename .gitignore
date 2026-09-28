@@ -21,8 +21,25 @@ Thumbs.db
 # 本地旧版前端备份 (不入库)
 app/static_backup_v1/
 
+# 🔒 移动公众协议凭据（方案 B 外置）：绝不入库，缺失时侧车会直接报错
+app/ecloud_engine/credentials.json
+app/ecloud_engine/__pycache__/
+**/__pycache__/
+*.pyc
+# 侧车运行时产物：会话 token（免重复登录）与交互登录限流记账，均为本机状态
+app/ecloud_engine/data/
+app/ecloud_engine/sessions.json
+
 # 本地分析产物与会话还原记录 (含敏感信息，绝不入库)
 analysis/
 
 # WorkBuddy 本地项目数据 (记忆 / 技能等，非代码，不入库)
 .workbuddy/
+.workbuddy-ai/
+
+# 本地临时输出 (闸门/探针脚本的 stdout，绝不入库)
+repro_out.txt
+status_out.txt
+
+# 探针脚本的原始产物（平台返回原文 / 派生材料，绝不入库）
+tools/_*
