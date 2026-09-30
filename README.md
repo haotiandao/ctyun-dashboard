@@ -206,3 +206,5 @@ ctyun-dashboard/
 ## 📜 免责声明
 
 *本项目仅供自动化运维、技术研究与学习交流使用，请遵守天翼云、中国移动云电脑平台相关使用规范与协议。*
+
+借鉴了ecloud-cmsszte-alive；leleji/CtYun等项目
